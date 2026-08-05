@@ -32,13 +32,13 @@ final class PlayerEngine: ObservableObject {
     static let postReadyFailConfirmCount = 6
 
     /// 起播保持短缓冲，先拿到第一帧；出画后再切换到稳定缓冲。
-    static let initialBufferSeconds: TimeInterval = 4
+    static let initialBufferSeconds: TimeInterval = 6
 
     static let startupExtensionNs: UInt64 = 6_000_000_000
     static let maxStartupExtensions = 2
 
     static var steadyBufferSeconds: TimeInterval {
-        NetworkMonitor.shared.isCellular ? 16 : 12
+        NetworkMonitor.shared.isCellular ? 18 : 24
     }
 
     static var stallTimeoutNs: UInt64 {
@@ -115,7 +115,8 @@ final class PlayerEngine: ObservableObject {
 
     init() {
         player.actionAtItemEnd = .none
-        player.automaticallyWaitsToMinimizeStalling = true
+        // 直播流必须为 false：true 会在追平直播边缘时反复进入「等缓冲」，造成画面一顿一顿
+        player.automaticallyWaitsToMinimizeStalling = false
         observeTimeControl()
         setupCacheCleanup()
         NotificationCenter.default.publisher(for: Notification.Name("tvPlayerVideoRendered"))
@@ -184,7 +185,7 @@ final class PlayerEngine: ObservableObject {
         item.preferredForwardBufferDuration = Self.initialBufferSeconds
         item.preferredPeakBitRate = 0
         item.canUseNetworkResourcesForLiveStreamingWhilePaused = false
-        player.automaticallyWaitsToMinimizeStalling = true
+        player.automaticallyWaitsToMinimizeStalling = false
 
         // 强制刷新播放器状态，防止画面冻结
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
@@ -807,7 +808,7 @@ final class PlayerEngine: ObservableObject {
         LineQualityStore.shared.recordStall(url: currentURLString)
 
         // 第一次卡顿先扩大缓冲；连续卡顿才降码率，避免轻微网络抖动损失画质。
-        item.preferredForwardBufferDuration = min(Self.steadyBufferSeconds + 4, 22)
+        item.preferredForwardBufferDuration = min(Self.steadyBufferSeconds + 6, 30)
         if recentStalls.count >= 2 {
             applyTemporaryBitrateLimit(to: item)
         }
