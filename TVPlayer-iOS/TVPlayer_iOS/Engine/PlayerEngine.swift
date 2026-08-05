@@ -115,8 +115,10 @@ final class PlayerEngine: ObservableObject {
 
     init() {
         player.actionAtItemEnd = .none
-        // 直播流必须为 false：true 会在追平直播边缘时反复进入「等缓冲」，造成画面一顿一顿
-        player.automaticallyWaitsToMinimizeStalling = false
+        // 高清隔行(1080i)源段长 10s、码率约 4Mbps：若立刻播放不等视频缓冲，
+        // 网络抖动时 AVPlayer 会丢视频帧保音频 → 「声音流畅、画面幻灯片」。
+        // true：宁可短暂等缓冲，也不把视频抽成幻灯片；卡顿仍由 stall 检测换线兜底。
+        player.automaticallyWaitsToMinimizeStalling = true
         observeTimeControl()
         setupCacheCleanup()
         NotificationCenter.default.publisher(for: Notification.Name("tvPlayerVideoRendered"))
@@ -185,7 +187,8 @@ final class PlayerEngine: ObservableObject {
         item.preferredForwardBufferDuration = Self.initialBufferSeconds
         item.preferredPeakBitRate = 0
         item.canUseNetworkResourcesForLiveStreamingWhilePaused = false
-        player.automaticallyWaitsToMinimizeStalling = false
+        // 与 init 一致：等待视频在线可用，避免音频先启后视频抽帧成幻灯片
+        player.automaticallyWaitsToMinimizeStalling = true
 
         // 强制刷新播放器状态，防止画面冻结
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
