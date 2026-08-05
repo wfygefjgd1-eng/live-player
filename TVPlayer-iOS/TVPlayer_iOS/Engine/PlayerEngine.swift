@@ -215,7 +215,7 @@ final class PlayerEngine: ObservableObject {
         }
         let accessLog = item.accessLog()
         let errorLog = item.errorLog()
-        let speed = sampleObservedSpeedKBps()
+        let speed = sampleObservedSpeedKBps(accessLog: accessLog)
         let clockAdvancing = hasRendered
             && lastTimeProgressAt != .distantPast
             && Date().timeIntervalSince(lastTimeProgressAt) <= Self.progressStallThreshold
@@ -807,12 +807,12 @@ final class PlayerEngine: ObservableObject {
         recentStalls.append(now)
         LineQualityStore.shared.recordStall(url: currentURLString)
 
-        // 第一次卡顿先扩大缓冲；连续卡顿才降码率，避免轻微网络抖动损失画质。
-        item.preferredForwardBufferDuration = min(Self.steadyBufferSeconds + 6, 30)
+        // 播放中不再反复调 preferredForwardBufferDuration：会触发 AVPlayer 重新调缓冲，
+        // 造成画面丢帧而音频正常（稳定缓冲已在出画时设好，足够吸收小抖动）。
         if recentStalls.count >= 2 {
             applyTemporaryBitrateLimit(to: item)
         }
-        updateDiagnostics(reason: recentStalls.count >= 2 ? "连续卡顿，已自适应" : "正在扩大缓冲")
+        updateDiagnostics(reason: recentStalls.count >= 2 ? "连续卡顿，已自适应" : "检测到卡顿")
     }
 
     private func applyTemporaryBitrateLimit(to item: AVPlayerItem) {
@@ -948,7 +948,8 @@ final class PlayerEngine: ObservableObject {
         speedCheckTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 500_000_000)
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 400_000_000)
+                // 1s 轮询：accessLog/errorLog 属于较重调用，主线程高频采集会拖慢 AVPlayerLayer 渲染造成视频掉帧
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
                 guard let self, self.lineTimeoutEnabled, self.playToken == token, !Task.isCancelled else { return }
                 if self.player.timeControlStatus == .paused { continue }
                 guard self.isReady, self.stallWatchEnabled else { continue }
@@ -1050,9 +1051,9 @@ final class PlayerEngine: ObservableObject {
 
     /// 从 AVPlayerItemAccessLog 估算 KB/s
     @discardableResult
-    func sampleObservedSpeedKBps() -> Double {
+    func sampleObservedSpeedKBps(accessLog log: AVPlayerItemAccessLog? = nil) -> Double {
         guard let item = player.currentItem,
-              let log = item.accessLog(),
+              let log = log ?? item.accessLog(),
               let last = log.events.last else {
             observedSpeedKBps = lastObservedKBps
             return lastObservedKBps
