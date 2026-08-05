@@ -33,6 +33,9 @@ final class PlayerEngine: ObservableObject {
 
     /// 起播保持短缓冲，先拿到第一帧；出画后再切换到稳定缓冲。
     static let initialBufferSeconds: TimeInterval = 6
+    /// 264788/DarwinChow 线路使用 10 秒长分片；至少准备两段，避免音频先走、
+    /// 1080i 视频来不及解码时被 AVPlayer 抽帧成“幻灯片”。
+    static let longSegmentBufferSeconds: TimeInterval = 18
 
     static let startupExtensionNs: UInt64 = 6_000_000_000
     static let maxStartupExtensions = 2
@@ -110,6 +113,7 @@ final class PlayerEngine: ObservableObject {
     private var lastStallAt: Date = .distantPast
     private var lastQualitySampleAt: Date = .distantPast
     private var activePeakBitRate: Double = 0
+    private var activeSteadyBufferSeconds: TimeInterval = 0
     private var failureRecorded = false
     private var startupExtensionCount = 0
 
@@ -179,12 +183,16 @@ final class PlayerEngine: ObservableObject {
         currentURLString = url.absoluteString
         playStartedAt = Date()
 
+        let bufferProfile = Self.bufferProfile(for: url)
+        activeSteadyBufferSeconds = bufferProfile.steady
+        diagnostics = PlaybackDiagnostics(bufferSeconds: bufferProfile.initial)
+
         let asset = AVURLAsset(url: url, options: [
             AVURLAssetPreferPreciseDurationAndTimingKey: false,
             "AVURLAssetHTTPHeaderFieldsKey": ["User-Agent": "Mozilla/5.0 (iPhone; CPU iOS 17_0 like Mac OS X)"]
         ])
         let item = AVPlayerItem(asset: asset)
-        item.preferredForwardBufferDuration = Self.initialBufferSeconds
+        item.preferredForwardBufferDuration = bufferProfile.initial
         item.preferredPeakBitRate = 0
         item.canUseNetworkResourcesForLiveStreamingWhilePaused = false
         // 与 init 一致：等待视频在线可用，避免音频先启后视频抽帧成幻灯片
@@ -205,8 +213,15 @@ final class PlayerEngine: ObservableObject {
             }
 
             self.player.play()
-            self.player.rate = 1.0
         }
+    }
+
+    private static func bufferProfile(for url: URL) -> (initial: TimeInterval, steady: TimeInterval) {
+        let host = (url.host ?? "").lowercased()
+        if host == "live.264788.xyz" || host.hasSuffix(".264788.xyz") {
+            return (longSegmentBufferSeconds, longSegmentBufferSeconds)
+        }
+        return (initialBufferSeconds, steadyBufferSeconds)
     }
 
     // MARK: - 多信号融合评估器（统一采集 + 加权投票）
@@ -427,7 +442,6 @@ final class PlayerEngine: ObservableObject {
     func resume() {
         guard player.currentItem != nil else { return }
         player.play()
-        player.rate = 1.0
         isPlaying = true
         WindowVideoSurface.shared.rebindPlayer()
     }
@@ -442,7 +456,9 @@ final class PlayerEngine: ObservableObject {
             cancelAllTasks()
             activePeakBitRate = 0
             player.currentItem?.preferredPeakBitRate = 0
-            player.currentItem?.preferredForwardBufferDuration = Self.steadyBufferSeconds
+            let steadyBuffer = activeSteadyBufferSeconds > 0
+                ? activeSteadyBufferSeconds : Self.steadyBufferSeconds
+            player.currentItem?.preferredForwardBufferDuration = steadyBuffer
             return
         }
 
@@ -717,7 +733,9 @@ final class PlayerEngine: ObservableObject {
         cancelTask(named: "errorGrace")
         isReady = true
         hasRendered = true
-        player.currentItem?.preferredForwardBufferDuration = Self.steadyBufferSeconds
+        let steadyBuffer = activeSteadyBufferSeconds > 0
+            ? activeSteadyBufferSeconds : Self.steadyBufferSeconds
+        player.currentItem?.preferredForwardBufferDuration = steadyBuffer
         let startupSeconds = playStartedAt == .distantPast
             ? 0 : Date().timeIntervalSince(playStartedAt)
         LineQualityStore.shared.recordStart(
@@ -726,7 +744,6 @@ final class PlayerEngine: ObservableObject {
         )
         updateDiagnostics(reason: "播放稳定")
         player.play()
-        player.rate = 1.0
         isPlaying = true
         onReady?()
         WindowVideoSurface.shared.rebindPlayer()
@@ -890,18 +907,10 @@ final class PlayerEngine: ObservableObject {
     }
 
     /// Evidence that decoded video exists, rather than only an advancing
-    /// audio/live clock. presentationSize becomes valid once AVFoundation has
-    /// received a video sample; isReadyForDisplay is reported separately by
-    /// WindowVideoSurface and sets hasRendered immediately when available.
+    /// audio/live clock. AVPlayerLayer.isReadyForDisplay is observed by
+    /// PlayerSurfaceView and sets hasRendered only after a frame can be shown.
     private func hasVideoFrameEvidence() -> Bool {
-        if hasRendered { return true }
-        guard let item = player.currentItem,
-              item.presentationSize.width > 1,
-              item.presentationSize.height > 1,
-              lastTimeProgressAt != .distantPast else {
-            return false
-        }
-        return hasVideoTrackPresent()
+        hasRendered
     }
 
     // MARK: - 多信号融合「播放中」健康评估（统一采集 + 加权投票）

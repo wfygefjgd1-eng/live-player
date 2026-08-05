@@ -26,6 +26,8 @@ final class SinkContainerView: UIView {
 
 final class PlayerSurfaceView: UIView {
     private var boundPlayer: AVPlayer?
+    private var readyForDisplayObservation: NSKeyValueObservation?
+    private weak var lastReportedItem: AVPlayerItem?
 
     override class var layerClass: AnyClass { AVPlayerLayer.self }
 
@@ -44,12 +46,45 @@ final class PlayerSurfaceView: UIView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     func setPlayer(_ player: AVPlayer?) {
+        let playerChanged = boundPlayer !== player
         boundPlayer = player
-        playerLayer.player = player
+        if playerLayer.player !== player {
+            playerLayer.player = player
+        }
+        if playerChanged || readyForDisplayObservation == nil {
+            observeReadyForDisplay()
+        }
+        reportReadyForDisplayIfNeeded()
         playerLayer.isHidden = false
         playerLayer.opacity = 1
         playerLayer.videoGravity = .resizeAspect
         setNeedsLayout()
+    }
+
+    private func observeReadyForDisplay() {
+        readyForDisplayObservation?.invalidate()
+        lastReportedItem = nil
+        readyForDisplayObservation = playerLayer.observe(
+            \.isReadyForDisplay,
+            options: [.initial, .new]
+        ) { [weak self] layer, _ in
+            guard layer.isReadyForDisplay else { return }
+            DispatchQueue.main.async {
+                self?.reportReadyForDisplayIfNeeded()
+            }
+        }
+    }
+
+    private func reportReadyForDisplayIfNeeded() {
+        guard playerLayer.isReadyForDisplay,
+              let player = boundPlayer,
+              let item = player.currentItem,
+              lastReportedItem !== item else { return }
+        lastReportedItem = item
+        NotificationCenter.default.post(
+            name: Notification.Name("tvPlayerVideoRendered"),
+            object: player
+        )
     }
 
     func rebind() {
@@ -138,8 +173,11 @@ final class WindowVideoSurface {
         if let container {
             layoutSurface(in: container)
         }
-        if let p = boundPlayer {
-            surface?.setPlayer(p)
+        if boundPlayer != nil {
+            if surface?.superview == nil, let container {
+                install(in: container)
+            }
+            surface?.rebind()
         } else {
             surface?.rebind()
         }
