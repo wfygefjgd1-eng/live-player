@@ -776,7 +776,6 @@ final class PlayerEngine: ObservableObject {
         case .playing:
             cancelTask(named: "stall")
             continuousStall = false
-            scheduleBitrateRecoveryIfNeeded()
         case .paused:
             cancelTask(named: "stall")
             continuousStall = false
@@ -800,52 +799,15 @@ final class PlayerEngine: ObservableObject {
     // MARK: - Adaptive Buffering
 
     private func registerStall() {
-        guard isReady, let item = player.currentItem else { return }
+        guard isReady else { return }
         let now = Date()
         lastStallAt = now
         recentStalls = recentStalls.filter { now.timeIntervalSince($0) <= 45 }
         recentStalls.append(now)
         LineQualityStore.shared.recordStall(url: currentURLString)
-
-        // 播放中不再反复调 preferredForwardBufferDuration：会触发 AVPlayer 重新调缓冲，
-        // 造成画面丢帧而音频正常（稳定缓冲已在出画时设好，足够吸收小抖动）。
-        if recentStalls.count >= 2 {
-            applyTemporaryBitrateLimit(to: item)
-        }
-        updateDiagnostics(reason: recentStalls.count >= 2 ? "连续卡顿，已自适应" : "检测到卡顿")
-    }
-
-    private func applyTemporaryBitrateLimit(to item: AVPlayerItem) {
-        guard let event = item.accessLog()?.events.last else { return }
-        let streamBitrate = event.indicatedBitrate
-        let observedBitrate = event.observedBitrate
-        let basis: Double
-        if streamBitrate > 0, observedBitrate > 0 {
-            basis = min(streamBitrate, observedBitrate)
-        } else {
-            basis = max(streamBitrate, observedBitrate)
-        }
-        guard basis > 0 else { return }
-
-        let proposed = max(700_000, min(basis * 0.75, 4_500_000))
-        if activePeakBitRate == 0 || proposed < activePeakBitRate {
-            activePeakBitRate = proposed
-            item.preferredPeakBitRate = proposed
-        }
-    }
-
-    private func scheduleBitrateRecoveryIfNeeded() {
-        guard activePeakBitRate > 0 else { return }
-        let token = playToken
-        scheduleTask(named: "bitrateRecovery", token: token, timeout: 90_000_000_000) { [weak self] in
-            guard let self, self.playToken == token else { return }
-            guard Date().timeIntervalSince(self.lastStallAt) >= 85 else { return }
-            self.activePeakBitRate = 0
-            self.player.currentItem?.preferredPeakBitRate = 0
-            self.player.currentItem?.preferredForwardBufferDuration = Self.steadyBufferSeconds
-            self.recentStalls.removeAll()
-            self.updateDiagnostics(reason: "网络稳定，已恢复自动画质")
-        }
+        // 播放中不调整 preferredForwardBufferDuration / preferredPeakBitRate：
+        // 单码率流限流无意义，且会触发 AVPlayer 重新调缓冲，造成画面丢帧而音频正常。
+        updateDiagnostics(reason: "检测到卡顿")
     }
 
     private func recordFailureOnce() {
