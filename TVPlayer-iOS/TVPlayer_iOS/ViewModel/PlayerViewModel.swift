@@ -473,6 +473,7 @@ final class PlayerViewModel: ObservableObject {
             return
         }
         let prevKey = currentChannel?.key
+        let prevURL = currentUrl
         rawChannels = loaded.map { Channel(name: $0.name, group: $0.group, key: $0.key, urls: $0.urls) }
         channels = applyRules(rawChannels)
         guard !channels.isEmpty else {
@@ -493,8 +494,18 @@ final class PlayerViewModel: ObservableObject {
         }
 
         if silent {
-            // 后台刷新：仅未出画时才自动开播，避免打断正在看的台
+            // 启动后台刷新：未出画时直接开播；已出画时若当前频道的原线路在最新数据里已不存在，
+            // 则用最新线路重新起播，避免一直沿用缓存里的旧线路
             if !player.isReady && !playbackStable {
+                playCurrent(showOSD: false, resetTried: true)
+            } else if let prevKey,
+                      let idx = channels.firstIndex(where: { $0.key == prevKey }),
+                      let prevURL,
+                      !channels[idx].urls.isEmpty,
+                      !channels[idx].urls.contains(prevURL) {
+                currentIndex = idx
+                playbackStable = false
+                triedLineIndices.removeAll()
                 playCurrent(showOSD: false, resetTried: true)
             }
         } else {
