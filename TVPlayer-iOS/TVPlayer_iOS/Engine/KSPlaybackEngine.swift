@@ -32,7 +32,7 @@ private final class TVKSOptions: KSOptions {
     }
 
     override func videoClockSync(main: KSClock, nextVideoTime: TimeInterval, fps: Double, frameCount: Int) -> (Double, ClockProcessType) {
-        let desired = main.getTime() - videoDelay
+        let desired = main.time.seconds + CACurrentMediaTime() - main.lastMediaTime - videoDelay
         let diff = nextVideoTime - desired
         // Do not drop every other frame for small audio-clock jitter. Only
         // discard frames after a clearly unrecoverable video lag.
