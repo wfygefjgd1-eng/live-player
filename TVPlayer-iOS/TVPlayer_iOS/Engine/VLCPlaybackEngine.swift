@@ -1,6 +1,9 @@
 import UIKit
+#if canImport(VLCKit)
 import VLCKit
+#endif
 
+#if canImport(VLCKit)
 /// VLC/FFmpeg-class live playback backend. AVPlayer remains available in
 /// PlayerEngine only as an automatic fallback when VLC cannot open a stream.
 @MainActor
@@ -159,3 +162,36 @@ final class VLCPlaybackEngine {
         }
     }
 }
+#else
+/// Compile-time stub retained so PlayerEngine's fallback code stays isolated.
+/// The shipping lightweight build does not embed VLCKit.
+@MainActor
+final class VLCPlaybackEngine {
+    struct DiagnosticsSample {
+        var observedBitrate: Double = 0
+        var averageVideoBitrate: Double = 0
+        var outputFrameRate: Double = 0
+        var nominalFrameRate: Double = 0
+        var droppedFrames: Int = 0
+        var droppedFramesPerSecond: Double = 0
+        var width: Int = 0
+        var height: Int = 0
+        var playbackClockSeconds: TimeInterval = 0
+        var stateText: String = "未开始"
+        var waitingReason: String = "无"
+        var hasVideoOutput = false
+    }
+
+    var onPlaying: (() -> Void)?
+    var onError: ((String) -> Void)?
+    var onStateChanged: ((String) -> Void)?
+
+    func play(url: URL, drawable: UIView, volume: Float) {}
+    func pause() {}
+    func resume() {}
+    func stop() {}
+    var hasAudioTrack: Bool { false }
+    var volume: Float = 1
+    func diagnosticsSample() -> DiagnosticsSample { DiagnosticsSample() }
+}
+#endif

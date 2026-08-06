@@ -58,7 +58,7 @@ final class PlayerEngine: ObservableObject {
 
     let player = AVPlayer()
     private let vlcEngine = VLCPlaybackEngine()
-    private var activeBackend: PlaybackBackend = .vlc
+    private var activeBackend: PlaybackBackend = .avPlayer
     private var currentURL: URL?
     private var hasFallenBackToAVPlayer = false
     private var vlcStartupTask: Task<Void, Never>?
@@ -95,7 +95,7 @@ final class PlayerEngine: ObservableObject {
     /// 最近采样网速 KB/s（供 UI/调试）
     @Published var observedSpeedKBps: Double = 0
     @Published private(set) var diagnostics = PlaybackDiagnostics()
-    @Published private(set) var activeEngineName = "VLC"
+    @Published private(set) var activeEngineName = "系统播放器"
 
     var diagnosticsSummary: String {
         let observed = diagnostics.observedBitrate > 0 ? String(format: "%.2f Mbps", diagnostics.observedBitrate / 1_000_000) : "未知"
@@ -200,40 +200,9 @@ final class PlayerEngine: ObservableObject {
     // MARK: - Public API
 
     func play(url: URL) {
-        stop()
-        let token = playToken
-        resetState(for: token)
-        currentURL = url
-        currentURLString = url.absoluteString
-        playStartedAt = Date()
-        hasFallenBackToAVPlayer = false
-        activeBackend = .vlc
-        activeEngineName = "VLC"
-        isPlaying = true
-        diagnostics = PlaybackDiagnostics(
-            timeControlStatus: "正在打开",
-            waitingReason: "VLC 正在缓冲/打开",
-            isBufferEmpty: false,
-            engineName: activeEngineName,
-            reason: "使用 VLC 兼容内核"
-        )
-
-        guard let drawable = WindowVideoSurface.shared.showVLC() else {
-            handleVLCFailure(reason: "VLC 画面承载层尚未就绪")
-            return
-        }
-
-        vlcEngine.play(url: url, drawable: drawable, volume: requestedVolume)
-        startLiveDiagnostics(token: token)
-
-        if lineTimeoutEnabled {
-            vlcStartupTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: Self.vlcStartupTimeoutNs)
-                guard let self, !Task.isCancelled, self.playToken == token,
-                      self.activeBackend == .vlc, !self.isReady else { return }
-                self.handleVLCFailure(reason: "VLC 起播超过 25 秒")
-            }
-        }
+        // Lightweight system-only path. It avoids embedding a third-party
+        // decoder while using the system AVPlayerViewController render path.
+        playWithAVPlayer(url: url, asFallback: false)
     }
 
     private func playWithAVPlayer(url: URL, asFallback: Bool) {
@@ -241,7 +210,7 @@ final class PlayerEngine: ObservableObject {
         vlcStartupTask = nil
         vlcEngine.stop()
         activeBackend = .avPlayer
-        activeEngineName = asFallback ? "AVPlayer（自动兜底）" : "AVPlayer"
+        activeEngineName = asFallback ? "AVPlayer（自动兜底）" : "系统播放器"
         WindowVideoSurface.shared.showAVPlayer(player)
 
         // 彻底清理之前的播放状态
@@ -1168,11 +1137,19 @@ final class PlayerEngine: ObservableObject {
         return !item.asset.tracks(withMediaType: .video).isEmpty
     }
 
-    /// Evidence that decoded video exists, rather than only an advancing
-    /// audio/live clock. AVPlayerLayer.isReadyForDisplay is observed by
-    /// PlayerSurfaceView and sets hasRendered only after a frame can be shown.
+    /// Evidence that decoded video exists. The lightweight renderer uses
+    /// AVPlayerViewController, so readiness is confirmed by a ready video
+    /// presentation size plus an advancing media clock instead of an
+    /// AVPlayerLayer callback.
     private func hasVideoFrameEvidence() -> Bool {
-        hasRendered
+        if hasRendered { return true }
+        guard activeBackend == .avPlayer,
+              let item = player.currentItem,
+              item.status == .readyToPlay,
+              item.presentationSize.width > 1,
+              item.presentationSize.height > 1,
+              lastTimeProgressAt != .distantPast else { return false }
+        return true
     }
 
     // MARK: - 多信号融合「播放中」健康评估（统一采集 + 加权投票）

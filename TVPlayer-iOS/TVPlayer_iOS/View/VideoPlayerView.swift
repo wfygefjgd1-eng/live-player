@@ -115,6 +115,7 @@ final class WindowVideoSurface {
     private(set) var vlcSurface: UIView?
     private weak var container: UIView?
     private var boundPlayer: AVPlayer?
+    private var systemPlayerController: AVPlayerViewController?
     private var activeBackend: Backend = .avPlayer
 
     private init() {}
@@ -135,14 +136,19 @@ final class WindowVideoSurface {
         )
         surface?.frame = frame
         vlcSurface?.frame = frame
+        systemPlayerController?.view.frame = frame
     }
 
     private func applyBackendVisibility() {
         let showVLC = activeBackend == .vlc
-        surface?.isHidden = showVLC
+        // The system controller is the only active AV renderer. Keeping the
+        // old AVPlayerLayer detached prevents duplicate rendering and freezes.
+        surface?.isHidden = true
         vlcSurface?.isHidden = !showVLC
-        surface?.alpha = showVLC ? 0 : 1
+        surface?.alpha = 0
         vlcSurface?.alpha = showVLC ? 1 : 0
+        systemPlayerController?.view.isHidden = showVLC
+        systemPlayerController?.view.alpha = showVLC ? 0 : 1
     }
 
     /// 安装到 root 容器底层，直接按物理横屏尺寸铺开，避免被上层布局压成中间小框
@@ -154,6 +160,26 @@ final class WindowVideoSurface {
         } else {
             surface = PlayerSurfaceView(frame: container.bounds)
             self.surface = surface
+        }
+
+        if systemPlayerController == nil {
+            let controller = AVPlayerViewController()
+            controller.showsPlaybackControls = false
+            controller.videoGravity = .resizeAspect
+            controller.allowsPictureInPicturePlayback = false
+            controller.entersFullScreenWhenPlaybackBegins = false
+            controller.exitsFullScreenWhenPlaybackEnds = false
+            controller.view.backgroundColor = .black
+            controller.view.isOpaque = true
+            controller.view.isUserInteractionEnabled = false
+            systemPlayerController = controller
+        }
+        if let controllerView = systemPlayerController?.view,
+           controllerView.superview !== container {
+            controllerView.removeFromSuperview()
+            controllerView.translatesAutoresizingMaskIntoConstraints = true
+            controllerView.autoresizingMask = []
+            container.insertSubview(controllerView, at: 0)
         }
 
         let vlcSurface: UIView
@@ -188,17 +214,21 @@ final class WindowVideoSurface {
         applyBackendVisibility()
 
         if let p = boundPlayer {
-            surface.setPlayer(p)
+            systemPlayerController?.player = p
+            surface.setPlayer(nil)
         }
     }
 
     func setPlayer(_ player: AVPlayer?) {
         boundPlayer = player
-        if let surface {
-            surface.setPlayer(player)
+        if let controller = systemPlayerController {
+            controller.player = player
+            surface?.setPlayer(nil)
+        } else if let surface {
+            surface.setPlayer(nil)
         } else if let container {
             install(in: container)
-            surface?.setPlayer(player)
+            systemPlayerController?.player = player
         }
     }
 
@@ -229,17 +259,16 @@ final class WindowVideoSurface {
             layoutSurface(in: container)
         }
         if boundPlayer != nil {
-            if surface?.superview == nil, let container {
+            if systemPlayerController?.view.superview == nil, let container {
                 install(in: container)
             }
-            surface?.rebind()
-        } else {
-            surface?.rebind()
+            systemPlayerController?.player = boundPlayer
         }
         applyBackendVisibility()
         // 两个解码画面都保持在 SwiftUI 叠层下方；当前后端由 hidden/alpha 控制。
         if let container {
             if let vlcSurface { container.sendSubviewToBack(vlcSurface) }
+            if let systemView = systemPlayerController?.view { container.sendSubviewToBack(systemView) }
             if let surface { container.sendSubviewToBack(surface) }
         }
     }

@@ -158,13 +158,13 @@ struct SourceManagementSheet: View {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("TV go 2.0")
                                 .font(.headline)
-                            Text("• VLC/FFmpeg 兼容内核作为所有直播源的默认播放器")
-                            Text("• 1080i 等隔行直播自动使用 VLC 去隔行，AVPlayer 仅作自动兜底")
+                            Text("• 使用系统 AVPlayerViewController 作为轻量视频渲染层")
+                            Text("• 不再内置 VLC，安装包恢复轻量体积")
                             Text("• 页面实时显示当前内核、输出/源帧率、丢帧、码率和等待原因")
                             Text("• 每次进入 App 都重新加载当前选中的来源")
                             Text("• 可复制包含全部实时指标的播放诊断，方便比较问题来源与正常来源")
                             Text("• 保留自动切换线路、失败线路黑名单和线路质量记忆")
-                            Text("• VLC 内核扩展 HLS、RTSP 等直播格式兼容性")
+                            Text("• 支持系统原生 HLS/HTTP 直播线路")
                             Text("• 支持自定义来源、收藏频道、隐藏线路和后台音频播放")
                         }
                         .font(.caption)

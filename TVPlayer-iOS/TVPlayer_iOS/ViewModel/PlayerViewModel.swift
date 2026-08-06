@@ -926,7 +926,7 @@ final class PlayerViewModel: ObservableObject {
         }
     }
 
-    /// 统一起播：HTTP(S) 仅 hardFail 预检跳过；其余支持协议直接交给 VLC。
+    /// 统一起播：仅 hardFail 预检跳过；unknown/ok 交给系统播放器。
     private func playLineLoop(channel ch: Channel, generation gen: Int, showOSD: Bool) async {
         var guardLoops = 0
         while guardLoops < ch.sourceCount {
@@ -953,7 +953,7 @@ final class PlayerViewModel: ObservableObject {
             }
 
             guard let u = URL(string: raw), let scheme = u.scheme?.lowercased(),
-                  scheme == "http" || scheme == "https" || scheme == "rtmp" || scheme == "rtsp" else {
+                  scheme == "http" || scheme == "https" else {
                 if lineTimeoutEnabled {
                     triedLineIndices.insert(idx)
                     currentSourceIndex = (idx + 1) % max(ch.sourceCount, 1)
@@ -964,8 +964,7 @@ final class PlayerViewModel: ObservableObject {
                 return
             }
 
-            // URLSession 只预检 HTTP(S)；RTMP/RTSP 直接交给 VLC 判断。
-            if lineTimeoutEnabled, scheme == "http" || scheme == "https" {
+            if lineTimeoutEnabled {
                 let result = await LineSpeedTester.shared.quickPreflight(raw, timeout: 2.5)
                 guard !Task.isCancelled, playGeneration == gen else { return }
                 guard currentChannel?.key == ch.key else { return }
