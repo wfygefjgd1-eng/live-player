@@ -78,7 +78,7 @@ final class VLCPlaybackEngine {
         mediaPlayer.videoFitMode = .smaller
         mediaPlayer.media = media
         mediaPlayer.setDeinterlaceFilter("yadif")
-        mediaPlayer.audio.volume = Int32((max(0, min(1, volume)) * 100).rounded())
+        mediaPlayer.audio?.volume = Int32((max(0, min(1, volume)) * 100).rounded())
 
         stoppedByOwner = false
         mediaPlayer.play()
@@ -104,8 +104,8 @@ final class VLCPlaybackEngine {
     var isPlaying: Bool { mediaPlayer.isPlaying }
 
     var volume: Float {
-        get { Float(mediaPlayer.audio.volume) / 100 }
-        set { mediaPlayer.audio.volume = Int32((max(0, min(1, newValue)) * 100).rounded()) }
+        get { Float(mediaPlayer.audio?.volume ?? 100) / 100 }
+        set { mediaPlayer.audio?.volume = Int32((max(0, min(1, newValue)) * 100).rounded()) }
     }
 
     var hasAudioTrack: Bool {
