@@ -1,12 +1,20 @@
 import UIKit
 #if canImport(VLCKit)
 import VLCKit
+#elseif canImport(MobileVLCKit)
+import MobileVLCKit
 #endif
 
-#if canImport(VLCKit)
-/// VLC/FFmpeg-class live playback backend. AVPlayer remains available in
-/// PlayerEngine only as an automatic fallback when VLC cannot open a stream.
-@MainActor
+#if canImport(VLCKit) || canImport(MobileVLCKit)
+/// VLC / libvlc 直播内核。AVPlayer 仅在 VLC 无法打开流时由 PlayerEngine 兜底。
+///
+/// 稳定性要点：所有 libvlc 统计/轨道/时间查询都在后台队列采样，主线程只读快照。
+/// （历史版本在 @MainActor 上同步轮询 statistics，会阻塞在 HLS demux 锁上导致 UI 冻结，
+///  这正是 v2.0 之前“VLCKit 不稳定”的根因。）
+///
+/// 该类本身非 actor 隔离：play/stop/pause/resume 在主线程调用（由 @MainActor 的
+/// PlayerEngine 驱动），后台采样在 samplerQueue 上读取 libvlc 的只读状态（libvlc 对
+/// 这类查询线程安全），共享快照 lastSnapshot 由 NSLock 保护。
 final class VLCPlaybackEngine {
     struct DiagnosticsSample {
         var observedBitrate: Double = 0
@@ -34,12 +42,20 @@ final class VLCPlaybackEngine {
     private var stoppedByOwner = true
     private var reportedPlaying = false
 
+    // 后台采样：避免在主线程触碰可能阻塞 demux 锁的 libvlc 调用
+    private let samplerQueue = DispatchQueue(label: "tvplayer.vlc.sampler", qos: .utility)
+    private let snapshotLock = NSLock()
+    private var samplerCancelled = true
+    private var lastSnapshot = DiagnosticsSample()
+
     init() {
         stateObserver = NotificationCenter.default.addObserver(
             forName: VLCMediaPlayer.stateChangedNotification,
             object: mediaPlayer,
             queue: .main
         ) { [weak self] _ in
+            // 状态变更是事件驱动，主线程读取 .state（快速缓存值）安全；
+            // 不在此触碰 statistics/tracks/time 等可能阻塞 demux 锁的接口。
             Task { @MainActor [weak self] in
                 self?.handleStateChange()
             }
@@ -50,6 +66,7 @@ final class VLCPlaybackEngine {
         if let stateObserver {
             NotificationCenter.default.removeObserver(stateObserver)
         }
+        samplerCancelled = true
     }
 
     func play(url: URL, drawable: UIView, volume: Float) {
@@ -57,29 +74,36 @@ final class VLCPlaybackEngine {
         mediaPlayer.stop()
 
         reportedPlaying = false
+        samplerCancelled = true
+        lastSnapshot = DiagnosticsSample()
 
         guard let media = VLCMedia(url: url) else {
             onError?("VLC 无法创建媒体")
             return
         }
 
-        // A larger live cache absorbs long HLS segments while VLC's own
-        // decoder/deinterlacer handles formats that AVPlayer cannot render well.
+        // 更大的直播缓存吸收长 HLS 分片；VLC 自身的解码器/反隔行器负责
+        // AVPlayer 难以渲染的格式。
         media.addOption(":network-caching=8000")
         media.addOption(":live-caching=8000")
         media.addOption(":http-reconnect=true")
         media.addOption(":avcodec-hw=videotoolbox")
+        // 串为媒体选项时，未知的选项名会被 VLC 忽略（仅告警），不会导致无法打开媒体，
+        // 因此这里设置反隔行模式无运行时风险。
+        media.addOption(":deinterlace-mode=yadif")
 
         activeMedia = media
         mediaPlayer.drawable = drawable
-        mediaPlayer.videoFitMode = .smaller
         mediaPlayer.media = media
-        mediaPlayer.setDeinterlaceFilter("yadif")
         mediaPlayer.audio?.volume = Int32((max(0, min(1, volume)) * 100).rounded())
 
         stoppedByOwner = false
         mediaPlayer.play()
         onStateChanged?("正在打开")
+
+        // 开启后台采样循环
+        samplerCancelled = false
+        scheduleNextSample()
     }
 
     func pause() {
@@ -87,15 +111,18 @@ final class VLCPlaybackEngine {
     }
 
     func resume() {
+        try? AVAudioSession.sharedInstance().setActive(true)
         mediaPlayer.play()
     }
 
     func stop() {
         stoppedByOwner = true
         reportedPlaying = false
+        samplerCancelled = true
         mediaPlayer.stop()
         mediaPlayer.media = nil
         activeMedia = nil
+        lastSnapshot = DiagnosticsSample()
     }
 
     var isPlaying: Bool { mediaPlayer.isPlaying }
@@ -109,27 +136,51 @@ final class VLCPlaybackEngine {
         !mediaPlayer.audioTracks.isEmpty || !(activeMedia?.audioTracks.isEmpty ?? true)
     }
 
+    /// 主线程调用：只读后台采样的快照，绝不触碰 libvlc。
     func diagnosticsSample() -> DiagnosticsSample {
-        guard activeMedia != nil else {
-            return DiagnosticsSample(stateText: stateText(for: mediaPlayer.state))
-        }
+        snapshotLock.lock()
+        let snap = lastSnapshot
+        snapshotLock.unlock()
+        return snap
+    }
 
-        // Keep this sampler deliberately non-blocking. libvlc media.statistics,
-        // track enumeration and time queries can wait on an HLS demux lock;
-        // calling them on the main actor caused the UI to freeze after startup.
+    // MARK: - 后台采样
+
+    private func scheduleNextSample() {
+        samplerQueue.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self, !self.samplerCancelled else { return }
+            self.collectSampleOnBackground()
+            self.scheduleNextSample()
+        }
+    }
+
+    /// 在后台队列采集 VLC 状态。这里允许触碰 videoSize / state / hasVideoOut 等
+    /// 可能阻塞 demux 锁的接口——因为不在主线程，最多让采样慢一拍，不会冻 UI。
+    private func collectSampleOnBackground() {
+        guard activeMedia != nil else { return }
+
         let videoSize = mediaPlayer.videoSize
         let width = videoSize.width > 1 ? Int(videoSize.width.rounded()) : 0
         let height = videoSize.height > 1 ? Int(videoSize.height.rounded()) : 0
         let state = mediaPlayer.state
+        let hasVideoOut = mediaPlayer.hasVideoOut
+        let stateText = self.stateText(for: state)
+        let waitingReason = state == .opening ? "VLC 正在缓冲/打开" : "无"
 
-        return DiagnosticsSample(
+        let snapshot = DiagnosticsSample(
             width: width,
             height: height,
-            stateText: stateText(for: state),
-            waitingReason: state == .opening ? "VLC 正在缓冲/打开" : "无",
-            hasVideoOutput: mediaPlayer.hasVideoOut
+            stateText: stateText,
+            waitingReason: waitingReason,
+            hasVideoOutput: hasVideoOut
         )
+
+        snapshotLock.lock()
+        lastSnapshot = snapshot
+        snapshotLock.unlock()
     }
+
+    // MARK: - 状态处理（事件驱动，主线程）
 
     private func handleStateChange() {
         let state = mediaPlayer.state
@@ -163,8 +214,8 @@ final class VLCPlaybackEngine {
     }
 }
 #else
-/// Compile-time stub retained so PlayerEngine's fallback code stays isolated.
-/// The shipping lightweight build does not embed VLCKit.
+/// 编译期占位：保留 PlayerEngine 兜底代码的隔离结构。
+/// 发版构建必须嵌入 VLCKit，否则此处会触发编译错误提醒。
 @MainActor
 final class VLCPlaybackEngine {
     struct DiagnosticsSample {
