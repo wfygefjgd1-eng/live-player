@@ -30,15 +30,11 @@ jobs:
         working-directory: TVPlayer-iOS
         run: xcodegen generate
 
-      - name: Install CocoaPods dependencies (MobileVLCKit)
-        working-directory: TVPlayer-iOS
-        run: pod install --repo-update
-
-      - name: Build iOS App (workspace)
+      - name: Build iOS App (SPM resolves MPVKit)
         working-directory: TVPlayer-iOS
         run: |
           xcodebuild \
-            -workspace TVPlayer.xcworkspace \
+            -project TVPlayer.xcodeproj \
             -scheme TVPlayer_iOS \
             -configuration Release \
             -destination 'generic/platform=iOS' \
@@ -48,7 +44,7 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO
 
-      - name: Verify VLCKit embedded in app
+      - name: Verify libmpv linked into app
         working-directory: TVPlayer-iOS
         run: |
           APP=build/TVPlayer.xcarchive/Products/Applications/TVPlayer_iOS.app
@@ -57,12 +53,13 @@ jobs:
             find build/TVPlayer.xcarchive -name "*.app"
             exit 1
           fi
-          if ! find "$APP" -maxdepth 3 -name "MobileVLCKit.framework" | grep -q .; then
-            echo "ERROR: MobileVLCKit.framework NOT embedded in app bundle (pod install likely missing)"
-            find "$APP" -maxdepth 3 -name "*.framework"
+          BIN="$APP/TVPlayer_iOS"
+          if ! nm -gU "$BIN" 2>/dev/null | grep -q 'mpv_create'; then
+            echo "ERROR: libmpv symbols (mpv_create) NOT linked into binary (SPM resolution likely failed)"
+            nm -gU "$BIN" 2>/dev/null | grep -i mpv | head -5
             exit 1
           fi
-          echo "OK: MobileVLCKit.framework embedded"
+          echo "OK: libmpv (MPVKit) linked into app binary"
           du -sh "$APP"
 
       - name: Get version from tag

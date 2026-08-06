@@ -39,13 +39,10 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
-      - name: Install CocoaPods dependencies (MobileVLCKit)
-        run: pod install --repo-update
-
-      - name: Build Release
+      - name: Build Release (SPM resolves MPVKit)
         run: |
           xcodebuild \
-            -workspace TVPlayer.xcworkspace \
+            -project TVPlayer.xcodeproj \
             -scheme TVPlayer_iOS \
             -configuration Release \
             -sdk iphoneos \
