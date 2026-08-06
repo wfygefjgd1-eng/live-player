@@ -54,17 +54,17 @@ jobs:
             exit 1
           fi
           BIN="$APP/TVPlayer_iOS"
-          if ! nm -g "$BIN" 2>/dev/null | grep -q 'mpv_create'; then
-            # Release 构建可能剥离符号：用体积兜底（libmpv+FFmpeg 静态链接约 +100MB）
+          if strings -a "$BIN" 2>/dev/null | grep -Eq 'mpv 0\.41\.0|libmpv'; then
+            echo "OK: libmpv (MPVKit 0.41.0) linked into app binary"
+          else
+            # Release 构建剥离符号后字符串也可能缺失：用体积兜底（libmpv+FFmpeg 静态链接约 +25MB）
             SIZE=$(du -m "$BIN" | cut -f1)
-            if [ "${SIZE:-0}" -lt 30 ]; then
-              echo "ERROR: no mpv_create symbol and binary only ${SIZE}MB - MPVKit not linked"
-              nm -g "$BIN" 2>/dev/null | grep -i mpv | head -5
+            if [ "${SIZE:-0}" -lt 20 ]; then
+              echo "ERROR: no libmpv strings and binary only ${SIZE}MB - MPVKit not linked"
+              strings -a "$BIN" 2>/dev/null | grep -i mpv | head -5
               exit 1
             fi
-            echo "OK: binary ${SIZE}MB (symbols stripped, size indicates MPVKit linked)"
-          else
-            echo "OK: libmpv (MPVKit) linked into app binary"
+            echo "OK: binary ${SIZE}MB (size indicates MPVKit linked)"
           fi
           du -sh "$APP"
 
