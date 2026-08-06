@@ -1009,7 +1009,9 @@ final class PlayerEngine: ObservableObject {
         diagnosticsTask?.cancel()
         diagnosticsTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                let interval: UInt64 = self?.activeBackend == .vlc
+                    ? 3_000_000_000 : 1_000_000_000
+                try? await Task.sleep(nanoseconds: interval)
                 guard let self, !Task.isCancelled, self.playToken == token else { return }
                 self.refreshDiagnostics(reason: nil)
             }

@@ -30,9 +30,6 @@ final class VLCPlaybackEngine {
     private var activeMedia: VLCMedia?
     private var stoppedByOwner = true
     private var reportedPlaying = false
-    private var lastDisplayedPictures: UInt64 = 0
-    private var lastLostPictures: UInt64 = 0
-    private var lastSampleAt = Date.distantPast
 
     init() {
         stateObserver = NotificationCenter.default.addObserver(
@@ -57,9 +54,6 @@ final class VLCPlaybackEngine {
         mediaPlayer.stop()
 
         reportedPlaying = false
-        lastDisplayedPictures = 0
-        lastLostPictures = 0
-        lastSampleAt = .distantPast
 
         guard let media = VLCMedia(url: url) else {
             onError?("VLC 无法创建媒体")
@@ -113,55 +107,21 @@ final class VLCPlaybackEngine {
     }
 
     func diagnosticsSample() -> DiagnosticsSample {
-        guard let media = activeMedia else {
+        guard activeMedia != nil else {
             return DiagnosticsSample(stateText: stateText(for: mediaPlayer.state))
         }
 
-        let statistics = media.statistics
-        let now = Date()
-        let displayed = statistics.displayedPictures
-        let lost = statistics.lostPictures + statistics.latePictures
-        var outputFPS = 0.0
-        var droppedPerSecond = 0.0
-
-        if lastSampleAt != .distantPast {
-            let elapsed = now.timeIntervalSince(lastSampleAt)
-            if elapsed > 0.2 {
-                if displayed >= lastDisplayedPictures {
-                    outputFPS = Double(displayed - lastDisplayedPictures) / elapsed
-                }
-                if lost >= lastLostPictures {
-                    droppedPerSecond = Double(lost - lastLostPictures) / elapsed
-                }
-            }
-        }
-        lastDisplayedPictures = displayed
-        lastLostPictures = lost
-        lastSampleAt = now
-
-        let videoTrack = media.videoTracks.first?.video
+        // Keep this sampler deliberately non-blocking. libvlc media.statistics,
+        // track enumeration and time queries can wait on an HLS demux lock;
+        // calling them on the main actor caused the UI to freeze after startup.
         let videoSize = mediaPlayer.videoSize
-        let width = videoSize.width > 1 ? Int(videoSize.width.rounded()) : Int(videoTrack?.width ?? 0)
-        let height = videoSize.height > 1 ? Int(videoSize.height.rounded()) : Int(videoTrack?.height ?? 0)
-        let denominator = Double(videoTrack?.frameRateDenominator ?? 0)
-        let nominalFPS = denominator > 0 ? Double(videoTrack?.frameRate ?? 0) / denominator : 0
-        let videoBitrate = Double(media.videoTracks.first?.bitrate ?? 0)
-        let clockMilliseconds = mediaPlayer.time.intValue
+        let width = videoSize.width > 1 ? Int(videoSize.width.rounded()) : 0
+        let height = videoSize.height > 1 ? Int(videoSize.height.rounded()) : 0
         let state = mediaPlayer.state
 
-        // libvlc reports inputBitrate in MiB/s.
-        let observedBitsPerSecond = Double(statistics.inputBitrate) * 8_000_000
-
         return DiagnosticsSample(
-            observedBitrate: observedBitsPerSecond,
-            averageVideoBitrate: videoBitrate,
-            outputFrameRate: outputFPS,
-            nominalFrameRate: nominalFPS,
-            droppedFrames: Int(lost),
-            droppedFramesPerSecond: droppedPerSecond,
             width: width,
             height: height,
-            playbackClockSeconds: Double(clockMilliseconds) / 1000,
             stateText: stateText(for: state),
             waitingReason: state == .opening ? "VLC 正在缓冲/打开" : "无",
             hasVideoOutput: mediaPlayer.hasVideoOut
