@@ -54,12 +54,18 @@ jobs:
             exit 1
           fi
           BIN="$APP/TVPlayer_iOS"
-          if ! nm -gU "$BIN" 2>/dev/null | grep -q 'mpv_create'; then
-            echo "ERROR: libmpv symbols (mpv_create) NOT linked into binary (SPM resolution likely failed)"
-            nm -gU "$BIN" 2>/dev/null | grep -i mpv | head -5
-            exit 1
+          if ! nm -g "$BIN" 2>/dev/null | grep -q 'mpv_create'; then
+            # Release 构建可能剥离符号：用体积兜底（libmpv+FFmpeg 静态链接约 +100MB）
+            SIZE=$(du -m "$BIN" | cut -f1)
+            if [ "${SIZE:-0}" -lt 30 ]; then
+              echo "ERROR: no mpv_create symbol and binary only ${SIZE}MB - MPVKit not linked"
+              nm -g "$BIN" 2>/dev/null | grep -i mpv | head -5
+              exit 1
+            fi
+            echo "OK: binary ${SIZE}MB (symbols stripped, size indicates MPVKit linked)"
+          else
+            echo "OK: libmpv (MPVKit) linked into app binary"
           fi
-          echo "OK: libmpv (MPVKit) linked into app binary"
           du -sh "$APP"
 
       - name: Get version from tag
