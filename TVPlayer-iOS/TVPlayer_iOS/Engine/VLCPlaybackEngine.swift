@@ -133,7 +133,13 @@ final class VLCPlaybackEngine {
     }
 
     var hasAudioTrack: Bool {
-        !mediaPlayer.audioTracks.isEmpty || !(activeMedia?.audioTracks.isEmpty ?? true)
+        guard let activeMedia else { return false }
+        return activeMedia.tracksInformation.contains { track in
+            if let dict = track as? [String: Any], (dict["type"] as? String) == "audio" {
+                return true
+            }
+            return false
+        }
     }
 
     /// 主线程调用：只读后台采样的快照，绝不触碰 libvlc。
@@ -203,12 +209,12 @@ final class VLCPlaybackEngine {
     private func stateText(for state: VLCMediaPlayerState) -> String {
         switch state {
         case .opening: return "正在打开"
+        case .buffering: return "缓冲中"
         case .playing: return "播放中"
         case .paused: return "暂停"
-        case .stopping: return "正在停止"
         case .stopped: return "已停止"
+        case .ended: return "已结束"
         case .error: return "错误"
-        case .nothingSpecial: return "未开始"
         @unknown default: return "未知"
         }
     }
