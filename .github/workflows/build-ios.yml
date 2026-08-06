@@ -30,11 +30,15 @@ jobs:
         working-directory: TVPlayer-iOS
         run: xcodegen generate
 
-      - name: Build iOS App
+      - name: Install CocoaPods dependencies (MobileVLCKit)
+        working-directory: TVPlayer-iOS
+        run: pod install --repo-update
+
+      - name: Build iOS App (workspace)
         working-directory: TVPlayer-iOS
         run: |
           xcodebuild \
-            -project TVPlayer.xcodeproj \
+            -workspace TVPlayer.xcworkspace \
             -scheme TVPlayer_iOS \
             -configuration Release \
             -destination 'generic/platform=iOS' \
@@ -43,6 +47,23 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO
+
+      - name: Verify VLCKit embedded in app
+        working-directory: TVPlayer-iOS
+        run: |
+          APP=build/TVPlayer.xcarchive/Products/Applications/TVPlayer_iOS.app
+          if [ ! -d "$APP" ]; then
+            echo "ERROR: $APP not found"
+            find build/TVPlayer.xcarchive -name "*.app"
+            exit 1
+          fi
+          if ! find "$APP" -maxdepth 3 -name "MobileVLCKit.framework" | grep -q .; then
+            echo "ERROR: MobileVLCKit.framework NOT embedded in app bundle (pod install likely missing)"
+            find "$APP" -maxdepth 3 -name "*.framework"
+            exit 1
+          fi
+          echo "OK: MobileVLCKit.framework embedded"
+          du -sh "$APP"
 
       - name: Get version from tag
         id: get_version
