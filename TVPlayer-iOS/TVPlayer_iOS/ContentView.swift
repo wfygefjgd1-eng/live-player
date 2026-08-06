@@ -158,7 +158,7 @@ struct ContentView: View {
                 }
                 .allowsHitTesting(false)
 
-                if vm.showDiagnosticsOverlay {
+                if vm.player.shouldShowDiagnostics {
                     VStack {
                         HStack {
                             Spacer(minLength: 0)
@@ -349,6 +349,7 @@ private struct PlaybackDiagnosticsOverlay: View {
             Text("内核 \(d.engineName)")
             Text("画面 \(d.resolutionText)  输出/源 \(fps(d.currentVideoFrameRate))/\(fps(d.nominalVideoFrameRate)) fps")
             Text("丢帧 \(d.droppedVideoFrames)  +\(String(format: "%.1f", d.droppedFramesPerSecond))/秒")
+            Text("音画偏差 \(String(format: "%.3f", d.audioVideoSyncDiff)) 秒")
             Text("缓冲 \(String(format: "%.1f", d.bufferSeconds)) 秒  \(d.isLikelyToKeepUp ? "可持续" : "不足")")
             Text("下载 \(mbps(d.observedBitrate))  视频 \(mbps(d.averageVideoBitrate))")
             Text("状态 \(d.timeControlStatus)  卡顿 \(d.stallCount)  等待：\(d.waitingReason)")

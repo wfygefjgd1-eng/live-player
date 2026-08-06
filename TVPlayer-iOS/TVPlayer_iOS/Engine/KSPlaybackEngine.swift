@@ -7,9 +7,13 @@ import KSPlayer
 @MainActor
 final class KSPlaybackEngine: NSObject {
     struct DiagnosticsSample {
+        var observedBytes: Int64 = 0
+        var videoBitrate: Double = 0
         var outputFrameRate: Double = 0
         var nominalFrameRate: Double = 0
         var droppedFrames: Int = 0
+        var audioVideoSyncDiff: TimeInterval = 0
+        var bufferSeconds: TimeInterval = 0
         var width: Int = 0
         var height: Int = 0
         var playbackClockSeconds: TimeInterval = 0
@@ -54,6 +58,8 @@ final class KSPlaybackEngine: NSObject {
         KSOptions.firstPlayerType = KSMEPlayer.self
         KSOptions.secondPlayerType = nil
         KSOptions.isSecondOpen = false
+        KSOptions.preferredFrame = true
+        KSOptions.yadifMode = 0
 
         let options = KSOptions()
         options.userAgent = "Mozilla/5.0 (iPhone; CPU iOS 17_0 like Mac OS X)"
@@ -61,12 +67,15 @@ final class KSPlaybackEngine: NSObject {
         options.maxBufferDuration = isLongSegmentSource(url) ? 24 : 15
         options.registerRemoteControll = false
         options.autoDeInterlace = true
+        options.videoAdaptable = false
 
         if isLongSegmentSource(url) {
             options.hardwareDecode = false
             options.asynchronousDecompression = false
             options.autoDeInterlace = false
-            options.videoFilters = ["yadif=mode=1:parity=-1:deint=1"]
+            // One output frame per input frame. mode=1 doubles the work to
+            // 50 fps and made 1080i software decoding miss its 25 fps target.
+            options.videoFilters = ["yadif=mode=0:parity=-1:deint=1"]
         }
 
         let layer = KSPlayerLayer(
@@ -105,9 +114,13 @@ final class KSPlaybackEngine: NSObject {
         let size = player.naturalSize
         let info = player.dynamicInfo
         return DiagnosticsSample(
+            observedBytes: info?.bytesRead ?? 0,
+            videoBitrate: Double(info?.videoBitrate ?? 0),
             outputFrameRate: info?.displayFPS ?? 0,
             nominalFrameRate: Double(player.nominalFrameRate),
             droppedFrames: Int(info?.droppedVideoFrameCount ?? 0),
+            audioVideoSyncDiff: info?.audioVideoSyncDiff ?? 0,
+            bufferSeconds: max(0, player.playableTime),
             width: size.width > 1 ? Int(size.width.rounded()) : 0,
             height: size.height > 1 ? Int(size.height.rounded()) : 0,
             playbackClockSeconds: player.currentPlaybackTime,

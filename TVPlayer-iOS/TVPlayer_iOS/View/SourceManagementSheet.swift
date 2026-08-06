@@ -138,10 +138,6 @@ struct SourceManagementSheet: View {
                     }
 
                     Section {
-                        Toggle(isOn: $vm.showDiagnosticsOverlay) {
-                            Label("页面显示实时诊断", systemImage: "waveform.path.ecg.rectangle")
-                        }
-
                         Button {
                             UIPasteboard.general.string = vm.diagnosticsSummary
                         } label: {
@@ -160,7 +156,7 @@ struct SourceManagementSheet: View {
                                 .font(.headline)
                             Text("• 使用系统 AVPlayerViewController 作为轻量视频渲染层")
                             Text("• 不再内置 VLC，安装包恢复轻量体积")
-                            Text("• 页面实时显示当前内核、输出/源帧率、丢帧、码率和等待原因")
+                            Text("• 仅在缓冲、低帧率、持续丢帧或音画不同步时显示实时诊断")
                             Text("• 每次进入 App 都重新加载当前选中的来源")
                             Text("• 可复制包含全部实时指标的播放诊断，方便比较问题来源与正常来源")
                             Text("• 保留自动切换线路、失败线路黑名单和线路质量记忆")

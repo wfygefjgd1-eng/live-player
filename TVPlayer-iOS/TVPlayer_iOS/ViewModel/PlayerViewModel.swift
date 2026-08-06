@@ -17,7 +17,7 @@ let LATEST_LINEUP_URLS: [String] = [
 private let CHANNEL_OSD_MS: UInt64 = 2_500_000_000
 private let INDICATOR_MS: UInt64 = 1_200_000_000
 /// 自动换线冷却：防止连续失败瞬间连跳
-private let AUTO_SWITCH_COOLDOWN_NS: UInt64 = 1_200_000_000
+private let AUTO_SWITCH_COOLDOWN_NS: UInt64 = 500_000_000
 /// 无声判定冷却（秒级防抖）
 private let SILENT_AUDIO_GRACE_NS: UInt64 = 10_000_000_000
 /// 连续自动 hop 频道上限（线都试完才 hop）
@@ -70,7 +70,6 @@ final class PlayerViewModel: ObservableObject {
     @Published var bootstrapMessage = "正在连接网络..."
     @Published var playerLayoutEpoch: Int = 0
     /// 页面实时诊断浮层，可在来源管理中关闭。
-    @Published var showDiagnosticsOverlay = true
     /// 正在从 GitHub 拉取官方最新线路
     @Published var isRefreshingLatest = false
 
@@ -965,7 +964,7 @@ final class PlayerViewModel: ObservableObject {
             }
 
             if lineTimeoutEnabled {
-                let result = await LineSpeedTester.shared.quickPreflight(raw, timeout: 2.5)
+                let result = await LineSpeedTester.shared.quickPreflight(raw, timeout: 1.8)
                 guard !Task.isCancelled, playGeneration == gen else { return }
                 guard currentChannel?.key == ch.key else { return }
                 if lineTimeoutEnabled && result == .hardFail {
@@ -1046,9 +1045,6 @@ final class PlayerViewModel: ObservableObject {
     private func onLowSpeed(_ reason: String) {
         // 仅引擎多信号确认后的无数据；画面仍在播则忽略
         guard lineTimeoutEnabled, !userPaused, !panelVisible else { return }
-        if playbackStable, player.isReady, player.isPlaying {
-            return
-        }
         autoSwitchLine(hint: reason, reason: .noData)
     }
 
