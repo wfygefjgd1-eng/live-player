@@ -1,6 +1,7 @@
 import UIKit
 import QuartzCore
 import Metal
+import AVFAudio
 import Libmpv
 
 /// mpv / libmpv 直播内核（MPVKit 预编译库）。AVPlayer 仅在 mpv 无法打开流时由 PlayerEngine 兜底。
@@ -169,7 +170,7 @@ final class MPVPlaybackEngine {
         checkError(mpv_set_option_string(ctx, "gpu-api", "vulkan"))
         checkError(mpv_set_option_string(ctx, "gpu-context", "moltenvk"))
         checkError(mpv_set_option_string(ctx, "hwdec", "videotoolbox"))
-        let layerPtr = Int64(bitPattern: UInt64(UInt(bitPattern: Unmanaged.passUnretained(layer).toOpaque())))
+        var layerPtr = Int64(bitPattern: UInt64(UInt(bitPattern: Unmanaged.passUnretained(layer).toOpaque())))
         checkError(mpv_set_option(ctx, "wid", MPV_FORMAT_INT64, &layerPtr))
 
         // 直播稳定：网络重连 + 播放缓存
@@ -341,15 +342,15 @@ final class MPVPlaybackEngine {
         defer { mpv_free_node_contents(&node) }
 
         var count = 0
-        for i in 0..<Int(list.num) {
-            let item = list.values[i]
+        for i in 0..<Int(list.pointee.num) {
+            let item = list.pointee.values[i]
             guard item.format == MPV_FORMAT_NODE_MAP, let map = item.u.list else { continue }
             var isAudio = false
-            for j in 0..<Int(map.num) {
-                guard let key = map.keys[j] else { continue }
+            for j in 0..<Int(map.pointee.num) {
+                guard let key = map.pointee.keys[j] else { continue }
                 let keyName = String(cString: key)
                 if keyName == "type",
-                   let value = map.values[j].u.string,
+                   let value = map.pointee.values[j].u.string,
                    String(cString: value) == "audio" {
                     isAudio = true
                 }
