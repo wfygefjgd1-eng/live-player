@@ -1,9 +1,0 @@
-# TVPlayer iOS — 通过 CocoaPods 引入 MobileVLCKit 作为稳定播放内核。
-# CI 与本地均使用：xcodegen generate → pod install → 编译 TVPlayer.xcworkspace
-platform :ios, '16.0'
-
-target 'TVPlayer_iOS' do
-  use_frameworks!
-  # 锁定 3.x 稳定线，避免拉到未来不兼容的 4.x。
-  pod 'MobileVLCKit', '~> 3.0'
-end

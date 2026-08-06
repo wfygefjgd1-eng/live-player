@@ -108,11 +108,11 @@ final class WindowVideoSurface {
 
     private enum Backend {
         case avPlayer
-        case vlc
+        case mpv
     }
 
     private(set) var surface: PlayerSurfaceView?
-    private(set) var vlcSurface: UIView?
+    private(set) var mpvSurface: UIView?
     private weak var container: UIView?
     private var boundPlayer: AVPlayer?
     private var systemPlayerController: AVPlayerViewController?
@@ -135,20 +135,20 @@ final class WindowVideoSurface {
             height: size.height
         )
         surface?.frame = frame
-        vlcSurface?.frame = frame
+        mpvSurface?.frame = frame
         systemPlayerController?.view.frame = frame
     }
 
     private func applyBackendVisibility() {
-        let showVLC = activeBackend == .vlc
+        let showMPV = activeBackend == .mpv
         // The system controller is the only active AV renderer. Keeping the
         // old AVPlayerLayer detached prevents duplicate rendering and freezes.
         surface?.isHidden = true
-        vlcSurface?.isHidden = !showVLC
+        mpvSurface?.isHidden = !showMPV
         surface?.alpha = 0
-        vlcSurface?.alpha = showVLC ? 1 : 0
-        systemPlayerController?.view.isHidden = showVLC
-        systemPlayerController?.view.alpha = showVLC ? 0 : 1
+        mpvSurface?.alpha = showMPV ? 1 : 0
+        systemPlayerController?.view.isHidden = showMPV
+        systemPlayerController?.view.alpha = showMPV ? 0 : 1
     }
 
     /// 安装到 root 容器底层，直接按物理横屏尺寸铺开，避免被上层布局压成中间小框
@@ -182,23 +182,19 @@ final class WindowVideoSurface {
             container.insertSubview(controllerView, at: 0)
         }
 
-        let vlcSurface: UIView
-        if let existing = self.vlcSurface {
-            vlcSurface = existing
+        let mpvSurface: UIView
+        if let existing = self.mpvSurface {
+            mpvSurface = existing
         } else {
-            vlcSurface = UIView(frame: container.bounds)
-            vlcSurface.backgroundColor = .black
-            vlcSurface.isOpaque = true
-            vlcSurface.clipsToBounds = true
-            vlcSurface.isUserInteractionEnabled = false
-            self.vlcSurface = vlcSurface
+            mpvSurface = MPVMetalHostView(frame: container.bounds)
+            self.mpvSurface = mpvSurface
         }
 
-        if vlcSurface.superview !== container {
-            vlcSurface.removeFromSuperview()
-            vlcSurface.translatesAutoresizingMaskIntoConstraints = true
-            vlcSurface.autoresizingMask = []
-            container.insertSubview(vlcSurface, at: 0)
+        if mpvSurface.superview !== container {
+            mpvSurface.removeFromSuperview()
+            mpvSurface.translatesAutoresizingMaskIntoConstraints = true
+            mpvSurface.autoresizingMask = []
+            container.insertSubview(mpvSurface, at: 0)
         }
 
         if surface.superview !== container {
@@ -232,16 +228,16 @@ final class WindowVideoSurface {
         }
     }
 
-    /// Activates VLC's persistent UIView drawable without disturbing SwiftUI.
+    /// Activates mpv's CAMetalLayer drawable without disturbing SwiftUI.
     @discardableResult
-    func showVLC() -> UIView? {
-        activeBackend = .vlc
-        if vlcSurface == nil, let container {
+    func showMPV() -> UIView? {
+        activeBackend = .mpv
+        if mpvSurface == nil, let container {
             install(in: container)
         }
         applyBackendVisibility()
         rebindPlayer()
-        return vlcSurface
+        return mpvSurface
     }
 
     func showAVPlayer(_ player: AVPlayer?) {
@@ -267,7 +263,7 @@ final class WindowVideoSurface {
         applyBackendVisibility()
         // 两个解码画面都保持在 SwiftUI 叠层下方；当前后端由 hidden/alpha 控制。
         if let container {
-            if let vlcSurface { container.sendSubviewToBack(vlcSurface) }
+            if let mpvSurface { container.sendSubviewToBack(mpvSurface) }
             if let systemView = systemPlayerController?.view { container.sendSubviewToBack(systemView) }
             if let surface { container.sendSubviewToBack(surface) }
         }

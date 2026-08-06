@@ -27,19 +27,14 @@ jobs:
           xcodegen generate
           ls -la *.xcodeproj
 
-      - name: Install CocoaPods dependencies (MobileVLCKit)
-        run: |
-          pod install --repo-update
-          ls -la *.xcworkspace
-
       - name: Show Xcode version
         run: |
           xcodebuild -version
           xcodebuild -showsdks
 
-      - name: Build archive (unsigned)
+      - name: Build archive (unsigned, SPM resolves MPVKit)
         run: |
-          xcodebuild -workspace TVPlayer.xcworkspace \
+          xcodebuild -project TVPlayer.xcodeproj \
             -scheme TVPlayer_iOS \
             -configuration Release \
             -destination 'generic/platform=iOS' \
