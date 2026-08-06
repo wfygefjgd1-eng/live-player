@@ -346,6 +346,7 @@ private struct PlaybackDiagnosticsOverlay: View {
                 Text("实时播放诊断")
                     .fontWeight(.semibold)
             }
+            Text("内核 \(d.engineName)")
             Text("画面 \(d.resolutionText)  输出/源 \(fps(d.currentVideoFrameRate))/\(fps(d.nominalVideoFrameRate)) fps")
             Text("丢帧 \(d.droppedVideoFrames)  +\(String(format: "%.1f", d.droppedFramesPerSecond))/秒")
             Text("缓冲 \(String(format: "%.1f", d.bufferSeconds)) 秒  \(d.isLikelyToKeepUp ? "可持续" : "不足")")

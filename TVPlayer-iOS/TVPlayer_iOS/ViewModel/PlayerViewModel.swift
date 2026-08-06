@@ -111,6 +111,7 @@ final class PlayerViewModel: ObservableObject {
     private var playbackStable = false
     private var recoverGeneration = 0
     private var loadGeneration = 0
+    private var lastEntrySourceReloadAt: Date = .distantPast
     /// 起播/切台代次：取消过期 playCurrent Task，防竞态覆盖
     private var playGeneration = 0
     /// 用户主动暂停：回前台/中断结束不得强制 resume
@@ -139,6 +140,7 @@ final class PlayerViewModel: ObservableObject {
         }
 
         restoreSources()
+        lastEntrySourceReloadAt = Date()
 
         // ① 缓存 / Bundle 立刻出画
         // ② 后台按当前活动源刷新（默认 DEFAULT_SOURCE_URL，不再走 JSON 旁路）
@@ -257,12 +259,22 @@ final class PlayerViewModel: ObservableObject {
     func onAppBecameActive() {
         UIApplication.shared.isIdleTimerDisabled = true
         WindowVideoSurface.shared.rebindPlayer()
+        guard started else { return }
+
+        // startup() already performs a network refresh. Every later foreground
+        // entry force-reloads the currently selected source, ignoring stale lists.
+        let now = Date()
+        if now.timeIntervalSince(lastEntrySourceReloadAt) >= 2 {
+            lastEntrySourceReloadAt = now
+            reloadActiveSource(entryRefresh: true)
+            return
+        }
         if channels.isEmpty {
             retryLoadSources()
             return
         }
         if userPaused { return }
-        if player.player.currentItem == nil {
+        if !player.hasCurrentMedia {
             playCurrent(showOSD: false, resetTried: false)
             return
         }
@@ -400,7 +412,8 @@ final class PlayerViewModel: ObservableObject {
         reloadActiveSource()
     }
 
-    func reloadActiveSource() {
+    func reloadActiveSource(entryRefresh: Bool = false) {
+        lastEntrySourceReloadAt = Date()
         playGeneration &+= 1
         playTask?.cancel()
         recoverGeneration &+= 1
@@ -413,7 +426,7 @@ final class PlayerViewModel: ObservableObject {
         triedLineIndices.removeAll()
         autoSwitchState = .idle
         player.stop()
-        showIndicator("正在切换源...")
+        showIndicator(entryRefresh ? "正在刷新当前源..." : "正在切换源...")
         loadChannels(force: true, silent: false, preferActiveOnly: true)
     }
 
@@ -913,7 +926,7 @@ final class PlayerViewModel: ObservableObject {
         }
     }
 
-    /// 统一起播：仅 hardFail 预检跳过；unknown/ok 都交给 AVPlayer
+    /// 统一起播：HTTP(S) 仅 hardFail 预检跳过；其余支持协议直接交给 VLC。
     private func playLineLoop(channel ch: Channel, generation gen: Int, showOSD: Bool) async {
         var guardLoops = 0
         while guardLoops < ch.sourceCount {
@@ -940,19 +953,19 @@ final class PlayerViewModel: ObservableObject {
             }
 
             guard let u = URL(string: raw), let scheme = u.scheme?.lowercased(),
-                  scheme == "http" || scheme == "https" else {
+                  scheme == "http" || scheme == "https" || scheme == "rtmp" || scheme == "rtsp" else {
                 if lineTimeoutEnabled {
                     triedLineIndices.insert(idx)
                     currentSourceIndex = (idx + 1) % max(ch.sourceCount, 1)
                     continue
                 }
                 autoSwitchState = .idle
-                showIndicator("iOS 不支持此线路协议，请手动切换")
+                showIndicator("不支持此线路协议，请手动切换")
                 return
             }
 
-            // 预检：只有 hardFail 才跳；超时/慢线 unknown 仍播放
-            if lineTimeoutEnabled {
+            // URLSession 只预检 HTTP(S)；RTMP/RTSP 直接交给 VLC 判断。
+            if lineTimeoutEnabled, scheme == "http" || scheme == "https" {
                 let result = await LineSpeedTester.shared.quickPreflight(raw, timeout: 2.5)
                 guard !Task.isCancelled, playGeneration == gen else { return }
                 guard currentChannel?.key == ch.key else { return }

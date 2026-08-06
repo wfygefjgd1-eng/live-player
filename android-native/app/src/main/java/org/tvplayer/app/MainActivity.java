@@ -135,6 +135,7 @@ public class MainActivity extends AppCompatActivity {
 
     /** 融合模式：off / fast / balanced / complete / smart（与 iOS 对齐） */
     private String fusionMode = "smart";
+    private boolean hasResumedOnce = false;
 
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
@@ -889,6 +890,37 @@ public class MainActivity extends AppCompatActivity {
         status.setText("正在切换源...");
         // 换源禁止灌入旧融合缓存
         loadChannels(false);
+    }
+
+    /** 每次重新进入 App 时只重新拉取当前选中的源，不复用频道缓存。 */
+    private void reloadCurrentSourceOnEntry() {
+        channels.clear();
+        adapter.setData(channels);
+        currentIndex = 0;
+        currentSourceIndex = 0;
+        resetTriedLines();
+        autoRecoverChannelHops = 0;
+        if (player != null) {
+            player.stop();
+            player.clearMediaItems();
+        }
+        loading = true;
+        waitingForReady = false;
+        cancelStallCheck();
+        status.setText("正在刷新当前源...");
+        showIndicator("正在刷新当前源...");
+
+        loadGeneration++;
+        final int gen = loadGeneration;
+        final String url = (activeSourceUrl == null || activeSourceUrl.trim().isEmpty())
+                ? DEFAULT_SOURCE_URL : activeSourceUrl.trim();
+        netPool.execute(() -> {
+            List<Channel> parsed = fetchOneSource(url);
+            mainHandler.post(() -> {
+                if (gen != loadGeneration) return;
+                applyLoadedChannels(parsed, parsed.isEmpty() ? 0 : 1, 1, false);
+            });
+        });
     }
 
     private void restoreSourceState() {
@@ -2061,5 +2093,11 @@ public class MainActivity extends AppCompatActivity {
     protected void onResume() {
         super.onResume();
         applyImmersiveMode();
+        if (hasResumedOnce) {
+            reloadCurrentSourceOnEntry();
+        } else {
+            // onCreate() already starts an uncached network refresh after applying cache.
+            hasResumedOnce = true;
+        }
     }
 }

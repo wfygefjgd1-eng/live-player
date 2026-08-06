@@ -10,11 +10,13 @@ android {
         applicationId "org.tvplayer.app"
         minSdkVersion 19
         targetSdkVersion 33
-        versionCode 9
-        versionName "1.5.5"
+        versionCode 20
+        versionName "2.0"
         multiDexEnabled true
-        // 安装包文件名体现 安卓&TV（桌面显示名见 strings app_name）
-        setProperty("archivesBaseName", "TVPlayer-安卓TV-v${versionName}")
+        ndk {
+            abiFilters "arm64-v8a"
+        }
+        setProperty("archivesBaseName", "TV-go-android-arm64-v${versionName}")
     }
 
     compileOptions {
@@ -34,7 +36,7 @@ android {
 
     applicationVariants.all { variant ->
         variant.outputs.all { output ->
-            output.outputFileName = "TVPlayer-安卓TV-v${variant.versionName}-${variant.buildType.name}.apk"
+            output.outputFileName = "TV-go-v${variant.versionName}-android-arm64-${variant.buildType.name}.apk"
         }
     }
 }

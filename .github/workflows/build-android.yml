@@ -57,7 +57,7 @@ jobs:
         run: |
           APK=$(find app/build/outputs/apk -name "*.apk" | head -1)
           echo "Found: $APK"
-          OUT="TVPlayer-安卓TV-v${{ steps.ver.outputs.version }}-release.apk"
+          OUT="TV-go-v${{ steps.ver.outputs.version }}-android-arm64.apk"
           cp "$APK" "$GITHUB_WORKSPACE/$OUT"
           echo "file=$OUT" >> $GITHUB_OUTPUT
           ls -la "$GITHUB_WORKSPACE/$OUT"
@@ -65,7 +65,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TVPlayer-Android
+          name: TV-go-Android-arm64
           path: ${{ github.workspace }}/${{ steps.apk.outputs.file }}
 
       - name: Create Release
@@ -74,6 +74,6 @@ jobs:
         with:
           files: ${{ github.workspace }}/${{ steps.apk.outputs.file }}
           body_path: RELEASE_NOTES_Android_v${{ steps.ver.outputs.version }}.md
-          name: TVPlayer 安卓&TV v${{ steps.ver.outputs.version }}
+          name: TV go Android ARM64 v${{ steps.ver.outputs.version }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

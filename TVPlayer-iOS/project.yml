@@ -9,9 +9,14 @@ settings:
   base:
     DEVELOPMENT_TEAM: ""
     SWIFT_VERSION: "5.9"
-    MARKETING_VERSION: "1.9.11"
-    CURRENT_PROJECT_VERSION: "1911"
+    MARKETING_VERSION: "2.0"
+    CURRENT_PROJECT_VERSION: "2000"
     ENABLE_USER_SCRIPT_SANDBOXING: "NO"
+
+packages:
+  VLCKit:
+    url: https://code.videolan.org/videolan/VLCKit.git
+    exactVersion: 4.0.0-a22
 
 targets:
   TVPlayer_iOS:
@@ -24,7 +29,7 @@ targets:
     info:
       path: TVPlayer_iOS/Info.plist
       properties:
-        CFBundleDisplayName: TVPlayer 正式版
+        CFBundleDisplayName: TV go
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         UIRequiredDeviceCapabilities: ["arm64"]
@@ -52,4 +57,5 @@ targets:
         TARGETED_DEVICE_FAMILY: "1,2"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
-    dependencies: []
+    dependencies:
+      - package: VLCKit

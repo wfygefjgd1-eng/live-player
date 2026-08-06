@@ -4,6 +4,11 @@ import Combine
 /// 起播/卡顿检测/静音检测引擎 — 结构化并发优化版
 @MainActor
 final class PlayerEngine: ObservableObject {
+    private enum PlaybackBackend {
+        case vlc
+        case avPlayer
+    }
+
     // MARK: - 配置（事件驱动：硬失败立刻切；软问题多事件+长确认才切）
     /// 起播硬上限：慢 HLS 也要给足时间，避免「没几个能看」
     static let startupHardTimeoutNs: UInt64 = 12_000_000_000
@@ -49,8 +54,15 @@ final class PlayerEngine: ObservableObject {
     }
 
     static var startupTimeoutNs: UInt64 { startupHardTimeoutNs }
+    static let vlcStartupTimeoutNs: UInt64 = 25_000_000_000
 
     let player = AVPlayer()
+    private let vlcEngine = VLCPlaybackEngine()
+    private var activeBackend: PlaybackBackend = .vlc
+    private var currentURL: URL?
+    private var hasFallenBackToAVPlayer = false
+    private var vlcStartupTask: Task<Void, Never>?
+    private var requestedVolume: Float = 1
     private var cancellables = Set<AnyCancellable>()
     private var statusObserver: NSKeyValueObservation?
     private var timeObserver: Any?
@@ -83,13 +95,14 @@ final class PlayerEngine: ObservableObject {
     /// 最近采样网速 KB/s（供 UI/调试）
     @Published var observedSpeedKBps: Double = 0
     @Published private(set) var diagnostics = PlaybackDiagnostics()
+    @Published private(set) var activeEngineName = "VLC"
 
     var diagnosticsSummary: String {
         let observed = diagnostics.observedBitrate > 0 ? String(format: "%.2f Mbps", diagnostics.observedBitrate / 1_000_000) : "未知"
         let indicated = diagnostics.indicatedBitrate > 0 ? String(format: "%.2f Mbps", diagnostics.indicatedBitrate / 1_000_000) : "未知"
         let averageVideo = diagnostics.averageVideoBitrate > 0
             ? String(format: "%.2f Mbps", diagnostics.averageVideoBitrate / 1_000_000) : "未知"
-        return "TVPlayer iOS 播放诊断\n线路: \(currentURLString.isEmpty ? "未知" : currentURLString)\n分辨率: \(diagnostics.resolutionText)\n输出/源帧率: \(String(format: "%.1f", diagnostics.currentVideoFrameRate)) / \(String(format: "%.1f", diagnostics.nominalVideoFrameRate)) fps\n累计丢帧: \(diagnostics.droppedVideoFrames)（最近 \(String(format: "%.1f", diagnostics.droppedFramesPerSecond)) 帧/秒）\n实际下载码率: \(observed)\n平均视频码率: \(averageVideo)\n标称码率: \(indicated)\n缓冲: \(String(format: "%.1f", diagnostics.bufferSeconds)) 秒\n卡顿: \(diagnostics.stallCount) 次\n播放状态: \(diagnostics.timeControlStatus)\n等待原因: \(diagnostics.waitingReason)\n缓冲可持续: \(diagnostics.isLikelyToKeepUp ? "是" : "否")\n诊断判断: \(diagnostics.assessment)\n最近状态: \(diagnostics.reason.isEmpty ? "未知" : diagnostics.reason)"
+        return "TV go iOS 播放诊断\n播放内核: \(activeEngineName)\n线路: \(currentURLString.isEmpty ? "未知" : currentURLString)\n分辨率: \(diagnostics.resolutionText)\n输出/源帧率: \(String(format: "%.1f", diagnostics.currentVideoFrameRate)) / \(String(format: "%.1f", diagnostics.nominalVideoFrameRate)) fps\n累计丢帧: \(diagnostics.droppedVideoFrames)（最近 \(String(format: "%.1f", diagnostics.droppedFramesPerSecond)) 帧/秒）\n实际下载码率: \(observed)\n平均视频码率: \(averageVideo)\n标称码率: \(indicated)\n缓冲: \(String(format: "%.1f", diagnostics.bufferSeconds)) 秒\n卡顿: \(diagnostics.stallCount) 次\n播放状态: \(diagnostics.timeControlStatus)\n等待原因: \(diagnostics.waitingReason)\n缓冲可持续: \(diagnostics.isLikelyToKeepUp ? "是" : "否")\n诊断判断: \(diagnostics.assessment)\n最近状态: \(diagnostics.reason.isEmpty ? "未知" : diagnostics.reason)"
     }
 
     var onError: (() -> Void)?
@@ -130,6 +143,16 @@ final class PlayerEngine: ObservableObject {
         player.automaticallyWaitsToMinimizeStalling = true
         observeTimeControl()
         setupCacheCleanup()
+        vlcEngine.onPlaying = { [weak self] in
+            self?.handleVLCPlaying()
+        }
+        vlcEngine.onError = { [weak self] reason in
+            self?.handleVLCFailure(reason: reason)
+        }
+        vlcEngine.onStateChanged = { [weak self] state in
+            guard let self, self.activeBackend == .vlc else { return }
+            self.diagnostics.timeControlStatus = state
+        }
         NotificationCenter.default.publisher(for: Notification.Name("tvPlayerVideoRendered"))
             .receive(on: DispatchQueue.main)
             .sink { [weak self] note in
@@ -170,12 +193,57 @@ final class PlayerEngine: ObservableObject {
             player.removeTimeObserver(obs)
         }
         diagnosticsTask?.cancel()
+        vlcStartupTask?.cancel()
         cancellables.removeAll()
     }
 
     // MARK: - Public API
 
     func play(url: URL) {
+        stop()
+        let token = playToken
+        resetState(for: token)
+        currentURL = url
+        currentURLString = url.absoluteString
+        playStartedAt = Date()
+        hasFallenBackToAVPlayer = false
+        activeBackend = .vlc
+        activeEngineName = "VLC"
+        isPlaying = true
+        diagnostics = PlaybackDiagnostics(
+            timeControlStatus: "正在打开",
+            waitingReason: "VLC 正在缓冲/打开",
+            isBufferEmpty: false,
+            engineName: activeEngineName,
+            reason: "使用 VLC 兼容内核"
+        )
+
+        guard let drawable = WindowVideoSurface.shared.showVLC() else {
+            handleVLCFailure(reason: "VLC 画面承载层尚未就绪")
+            return
+        }
+
+        vlcEngine.play(url: url, drawable: drawable, volume: requestedVolume)
+        startLiveDiagnostics(token: token)
+
+        if lineTimeoutEnabled {
+            vlcStartupTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: Self.vlcStartupTimeoutNs)
+                guard let self, !Task.isCancelled, self.playToken == token,
+                      self.activeBackend == .vlc, !self.isReady else { return }
+                self.handleVLCFailure(reason: "VLC 起播超过 25 秒")
+            }
+        }
+    }
+
+    private func playWithAVPlayer(url: URL, asFallback: Bool) {
+        vlcStartupTask?.cancel()
+        vlcStartupTask = nil
+        vlcEngine.stop()
+        activeBackend = .avPlayer
+        activeEngineName = asFallback ? "AVPlayer（自动兜底）" : "AVPlayer"
+        WindowVideoSurface.shared.showAVPlayer(player)
+
         // 彻底清理之前的播放状态
         pause()
         player.replaceCurrentItem(with: nil)
@@ -186,12 +254,17 @@ final class PlayerEngine: ObservableObject {
         statusObserver = nil
 
         resetState(for: token)
+        currentURL = url
         currentURLString = url.absoluteString
         playStartedAt = Date()
 
         let bufferProfile = Self.bufferProfile(for: url)
         activeSteadyBufferSeconds = bufferProfile.steady
-        diagnostics = PlaybackDiagnostics(bufferSeconds: bufferProfile.initial)
+        diagnostics = PlaybackDiagnostics(
+            bufferSeconds: bufferProfile.initial,
+            engineName: activeEngineName,
+            reason: asFallback ? "VLC 起播失败，已自动回退" : ""
+        )
 
         let asset = AVURLAsset(url: url, options: [
             AVURLAssetPreferPreciseDurationAndTimingKey: false,
@@ -221,6 +294,40 @@ final class PlayerEngine: ObservableObject {
 
             self.player.play()
         }
+    }
+
+    private func handleVLCPlaying() {
+        guard activeBackend == .vlc else { return }
+        vlcStartupTask?.cancel()
+        vlcStartupTask = nil
+        isPlaying = true
+        guard !isReady else { return }
+        isReady = true
+        diagnostics.timeControlStatus = "播放中"
+        diagnostics.waitingReason = "无"
+        diagnostics.isBufferEmpty = false
+        diagnostics.reason = "VLC 已输出画面"
+        let startupSeconds = playStartedAt == .distantPast
+            ? 0 : Date().timeIntervalSince(playStartedAt)
+        LineQualityStore.shared.recordStart(
+            url: currentURLString,
+            startupSeconds: startupSeconds
+        )
+        onReady?()
+    }
+
+    private func handleVLCFailure(reason: String) {
+        guard activeBackend == .vlc, let currentURL else { return }
+        vlcStartupTask?.cancel()
+        vlcStartupTask = nil
+        diagnostics.reason = reason
+        guard !hasFallenBackToAVPlayer else {
+            recordFailureOnce()
+            onError?()
+            return
+        }
+        hasFallenBackToAVPlayer = true
+        playWithAVPlayer(url: currentURL, asFallback: true)
     }
 
     private static func bufferProfile(for url: URL) -> (initial: TimeInterval, steady: TimeInterval) {
@@ -442,20 +549,49 @@ final class PlayerEngine: ObservableObject {
     }
 
     func pause() {
-        player.pause()
+        switch activeBackend {
+        case .vlc: vlcEngine.pause()
+        case .avPlayer: player.pause()
+        }
         isPlaying = false
     }
 
     func resume() {
-        guard player.currentItem != nil else { return }
-        player.play()
+        guard hasCurrentMedia else { return }
+        switch activeBackend {
+        case .vlc: vlcEngine.resume()
+        case .avPlayer: player.play()
+        }
         isPlaying = true
         WindowVideoSurface.shared.rebindPlayer()
+    }
+
+    var hasCurrentMedia: Bool {
+        switch activeBackend {
+        case .vlc: return currentURL != nil
+        case .avPlayer: return player.currentItem != nil
+        }
     }
 
     /// Re-arm line monitoring when the setting changes during playback.
     func setLineTimeoutEnabled(_ enabled: Bool) {
         lineTimeoutEnabled = enabled
+        if activeBackend == .vlc {
+            if !enabled {
+                vlcStartupTask?.cancel()
+                vlcStartupTask = nil
+            } else if !isReady, currentURL != nil {
+                let token = playToken
+                vlcStartupTask?.cancel()
+                vlcStartupTask = Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: Self.vlcStartupTimeoutNs)
+                    guard let self, !Task.isCancelled, self.playToken == token,
+                          self.activeBackend == .vlc, !self.isReady else { return }
+                    self.handleVLCFailure(reason: "VLC 起播超过 25 秒")
+                }
+            }
+            return
+        }
         guard enabled else {
             evidenceTask?.cancel()
             evidenceTask = nil
@@ -486,6 +622,9 @@ final class PlayerEngine: ObservableObject {
 
     func stop() {
         playToken += 1
+        vlcStartupTask?.cancel()
+        vlcStartupTask = nil
+        vlcEngine.stop()
         statusObserver?.invalidate()
         statusObserver = nil
         if let obs = timeObserver {
@@ -500,6 +639,7 @@ final class PlayerEngine: ObservableObject {
         diagnosticsTask?.cancel()
         diagnosticsTask = nil
         player.replaceCurrentItem(with: nil)
+        currentURL = nil
         isPlaying = false
         isReady = false
         stallWatchEnabled = false
@@ -518,12 +658,19 @@ final class PlayerEngine: ObservableObject {
     }
 
     var volume: Float {
-        get { player.volume }
-        set { player.volume = max(0, min(1, newValue)) }
+        get { requestedVolume }
+        set {
+            requestedVolume = max(0, min(1, newValue))
+            player.volume = requestedVolume
+            vlcEngine.volume = requestedVolume
+        }
     }
 
     /// 当前播放地址是否有可用的声音轨
     var hasActiveAudioTrack: Bool {
+        if activeBackend == .vlc {
+            return vlcEngine.hasAudioTrack
+        }
         guard let item = player.currentItem else { return false }
         let tracks = item.tracks.filter { $0.assetTrack?.mediaType == .audio }
         return tracks.contains { $0.isEnabled }
@@ -532,6 +679,8 @@ final class PlayerEngine: ObservableObject {
     // MARK: - Private — State Management
 
     private func resetState(for token: Int) {
+        vlcStartupTask?.cancel()
+        vlcStartupTask = nil
         cancelAllTasks()
         evidenceTask?.cancel()
         evidenceTask = nil
@@ -561,7 +710,10 @@ final class PlayerEngine: ObservableObject {
         lastDiagnosticSampleAt = .distantPast
         failureRecorded = false
         startupExtensionCount = 0
-        diagnostics = PlaybackDiagnostics(bufferSeconds: Self.initialBufferSeconds)
+        diagnostics = PlaybackDiagnostics(
+            bufferSeconds: Self.initialBufferSeconds,
+            engineName: activeEngineName
+        )
         isReady = false
         if let obs = timeObserver {
             player.removeTimeObserver(obs)
@@ -865,6 +1017,32 @@ final class PlayerEngine: ObservableObject {
     }
 
     private func refreshDiagnostics(reason: String?) {
+        if activeBackend == .vlc {
+            let sample = vlcEngine.diagnosticsSample()
+            observedSpeedKBps = sample.observedBitrate > 0
+                ? sample.observedBitrate / 8 / 1024 : 0
+            diagnostics = PlaybackDiagnostics(
+                observedBitrate: sample.observedBitrate,
+                averageVideoBitrate: sample.averageVideoBitrate,
+                currentVideoFrameRate: sample.outputFrameRate,
+                nominalVideoFrameRate: sample.nominalFrameRate,
+                droppedVideoFrames: sample.droppedFrames,
+                droppedFramesPerSecond: sample.droppedFramesPerSecond,
+                videoWidth: sample.width,
+                videoHeight: sample.height,
+                stallCount: diagnostics.stallCount,
+                bufferSeconds: 0,
+                timeControlStatus: sample.stateText,
+                waitingReason: sample.waitingReason,
+                isLikelyToKeepUp: sample.hasVideoOutput && sample.stateText == "播放中",
+                isBufferEmpty: false,
+                playbackClockSeconds: sample.playbackClockSeconds,
+                engineName: activeEngineName,
+                reason: reason ?? diagnostics.reason
+            )
+            return
+        }
+
         let item = player.currentItem
         let event = player.currentItem?.accessLog()?.events.last
         let itemTracks = item?.tracks ?? []
@@ -925,6 +1103,7 @@ final class PlayerEngine: ObservableObject {
             isLikelyToKeepUp: item?.isPlaybackLikelyToKeepUp ?? false,
             isBufferEmpty: item?.isPlaybackBufferEmpty ?? true,
             playbackClockSeconds: CMTimeGetSeconds(item?.currentTime() ?? .zero),
+            engineName: activeEngineName,
             reason: reason ?? diagnostics.reason
         )
     }
@@ -1236,6 +1415,7 @@ struct PlaybackDiagnostics: Equatable {
     var isLikelyToKeepUp: Bool
     var isBufferEmpty: Bool
     var playbackClockSeconds: TimeInterval
+    var engineName: String
     var reason: String
 
     var resolutionText: String {
@@ -1243,6 +1423,26 @@ struct PlaybackDiagnostics: Equatable {
     }
 
     var assessment: String {
+        if engineName == "VLC" {
+            if timeControlStatus == "错误" {
+                return "VLC 解码或媒体错误，准备自动兜底"
+            }
+            if timeControlStatus == "正在打开" {
+                return "VLC 正在建立直播缓冲"
+            }
+            if nominalVideoFrameRate >= 15,
+               currentVideoFrameRate > 0,
+               currentVideoFrameRate < nominalVideoFrameRate * 0.55 {
+                return "VLC 视频输出帧率明显偏低"
+            }
+            if droppedFramesPerSecond >= 3 {
+                return "VLC 解码持续丢帧"
+            }
+            if timeControlStatus == "播放中", isLikelyToKeepUp {
+                return "VLC 兼容内核播放正常"
+            }
+            return "正在收集 VLC 数据"
+        }
         if timeControlStatus == "等待" || isBufferEmpty {
             return "网络或缓冲不足"
         }
@@ -1281,6 +1481,7 @@ struct PlaybackDiagnostics: Equatable {
         isLikelyToKeepUp: Bool = false,
         isBufferEmpty: Bool = true,
         playbackClockSeconds: TimeInterval = 0,
+        engineName: String = "AVPlayer",
         reason: String = ""
     ) {
         self.observedBitrate = observedBitrate
@@ -1300,6 +1501,7 @@ struct PlaybackDiagnostics: Equatable {
         self.isLikelyToKeepUp = isLikelyToKeepUp
         self.isBufferEmpty = isBufferEmpty
         self.playbackClockSeconds = playbackClockSeconds
+        self.engineName = engineName
         self.reason = reason
     }
 }
