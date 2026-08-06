@@ -69,6 +69,8 @@ final class PlayerViewModel: ObservableObject {
     @Published var isBootstrapping = false
     @Published var bootstrapMessage = "正在连接网络..."
     @Published var playerLayoutEpoch: Int = 0
+    /// 页面实时诊断浮层，可在来源管理中关闭。
+    @Published var showDiagnosticsOverlay = true
     /// 正在从 GitHub 拉取官方最新线路
     @Published var isRefreshingLatest = false
 

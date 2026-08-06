@@ -138,6 +138,10 @@ struct SourceManagementSheet: View {
                     }
 
                     Section {
+                        Toggle(isOn: $vm.showDiagnosticsOverlay) {
+                            Label("页面显示实时诊断", systemImage: "waveform.path.ecg.rectangle")
+                        }
+
                         Button {
                             UIPasteboard.general.string = vm.diagnosticsSummary
                         } label: {
@@ -152,20 +156,13 @@ struct SourceManagementSheet: View {
 
                     Section {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("TVPlayer 1.9.8 正式版")
+                            Text("TVPlayer 1.9.11 正式版")
                                 .font(.headline)
-                            Text("• 起播恢复 4 秒短缓冲，有数据但未出画时最多观察 24 秒，避免误切")
-                            Text("• 新增动态缓冲：出画后按 WiFi / 蜂窝网络扩大缓冲，降低直播抖动")
-                            Text("• 连续卡顿时临时降低自适应码率，稳定 90 秒后自动恢复画质")
-                            Text("• 记忆线路起播、卡顿和稳定播放质量，下次优先选择更稳定线路")
-                            Text("• 新增自动切换线路、自动切换频道开关，默认开启并支持关闭")
-                            Text("• 新增失败线路黑名单功能，避免重复尝试失败线路")
-                            Text("• 优化真实缓冲检测、相对码率判断和起播预检总时限")
+                            Text("• 页面实时显示输出/源帧率、累计丢帧、每秒新增丢帧、缓冲、码率和等待原因")
+                            Text("• 自动判断网络缓冲不足、视频输出帧率偏低或 AVPlayer 解码/渲染持续丢帧")
+                            Text("• 可复制包含全部实时指标的播放诊断，方便比较问题来源与正常来源")
+                            Text("• 保留自动切换线路、失败线路黑名单和线路质量记忆")
                             Text("• 过滤 iOS 原生不支持的 RTMP / RTSP 线路")
-                            Text("• 新增播放诊断复制，方便定位手机端卡顿")
-                            Text("• 重排来源设置界面，地址输入固定在顶部，常用操作更紧凑")
-                            Text("• 支持单击画面暂停与恢复播放，双击面板操作保持不变")
-                            Text("• 暂停后显示居中恢复播放按钮，支持点击恢复")
                             Text("• 支持自定义来源、收藏频道、隐藏线路和后台音频播放")
                         }
                         .font(.caption)

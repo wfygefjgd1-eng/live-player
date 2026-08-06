@@ -158,6 +158,19 @@ struct ContentView: View {
                 }
                 .allowsHitTesting(false)
 
+                if vm.showDiagnosticsOverlay {
+                    VStack {
+                        HStack {
+                            Spacer(minLength: 0)
+                            PlaybackDiagnosticsOverlay(player: vm.player)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.top, top + 8)
+                    .padding(.trailing, max(geo.safeAreaInsets.trailing, 12) + 8)
+                    .allowsHitTesting(false)
+                }
+
                 if !numberInput.isEmpty {
                     VStack {
                         Spacer()
@@ -317,6 +330,62 @@ struct ContentView: View {
         numberInput = ""
         numberInputTask?.cancel()
         numberInputTask = nil
+    }
+}
+
+private struct PlaybackDiagnosticsOverlay: View {
+    @ObservedObject var player: PlayerEngine
+
+    var body: some View {
+        let d = player.diagnostics
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(statusColor(d))
+                    .frame(width: 7, height: 7)
+                Text("实时播放诊断")
+                    .fontWeight(.semibold)
+            }
+            Text("画面 \(d.resolutionText)  输出/源 \(fps(d.currentVideoFrameRate))/\(fps(d.nominalVideoFrameRate)) fps")
+            Text("丢帧 \(d.droppedVideoFrames)  +\(String(format: "%.1f", d.droppedFramesPerSecond))/秒")
+            Text("缓冲 \(String(format: "%.1f", d.bufferSeconds)) 秒  \(d.isLikelyToKeepUp ? "可持续" : "不足")")
+            Text("下载 \(mbps(d.observedBitrate))  视频 \(mbps(d.averageVideoBitrate))")
+            Text("状态 \(d.timeControlStatus)  卡顿 \(d.stallCount)  等待：\(d.waitingReason)")
+            Text("判断：\(d.assessment)")
+                .foregroundColor(statusColor(d))
+                .fontWeight(.semibold)
+        }
+        .font(.system(size: 11, weight: .regular, design: .monospaced))
+        .foregroundColor(.white)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(Color.black.opacity(0.72))
+        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .stroke(Color.white.opacity(0.22), lineWidth: 0.5)
+        )
+    }
+
+    private func fps(_ value: Double) -> String {
+        value > 0 ? String(format: "%.1f", value) : "--"
+    }
+
+    private func mbps(_ value: Double) -> String {
+        value > 0 ? String(format: "%.2fM", value / 1_000_000) : "--"
+    }
+
+    private func statusColor(_ d: PlaybackDiagnostics) -> Color {
+        if d.assessment.contains("持续丢帧") || d.assessment.contains("明显偏低") {
+            return .red
+        }
+        if d.assessment.contains("不足") || d.assessment.contains("检测到") {
+            return .orange
+        }
+        if d.assessment.contains("正常") {
+            return .green
+        }
+        return .yellow
     }
 }
 

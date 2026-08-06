@@ -74,6 +74,9 @@ final class PlayerEngine: ObservableObject {
     private var lowSpeedSince: Date?
     private var zeroSpeedSince: Date?
     private var speedCheckTask: Task<Void, Never>?
+    private var diagnosticsTask: Task<Void, Never>?
+    private var lastDiagnosticDroppedFrames = 0
+    private var lastDiagnosticSampleAt: Date = .distantPast
 
     @Published var isReady = false
     @Published var isPlaying = false
@@ -84,7 +87,9 @@ final class PlayerEngine: ObservableObject {
     var diagnosticsSummary: String {
         let observed = diagnostics.observedBitrate > 0 ? String(format: "%.2f Mbps", diagnostics.observedBitrate / 1_000_000) : "未知"
         let indicated = diagnostics.indicatedBitrate > 0 ? String(format: "%.2f Mbps", diagnostics.indicatedBitrate / 1_000_000) : "未知"
-        return "TVPlayer iOS 播放诊断\n线路: \(currentURLString.isEmpty ? "未知" : currentURLString)\n实际码率: \(observed)\n标称码率: \(indicated)\n缓冲: \(String(format: "%.1f", diagnostics.bufferSeconds)) 秒\n卡顿: \(diagnostics.stallCount) 次\n码率限制: \(diagnostics.peakBitRateLimit > 0 ? String(format: "%.2f Mbps", diagnostics.peakBitRateLimit / 1_000_000) : "自动")\n最近状态: \(diagnostics.reason.isEmpty ? "未知" : diagnostics.reason)"
+        let averageVideo = diagnostics.averageVideoBitrate > 0
+            ? String(format: "%.2f Mbps", diagnostics.averageVideoBitrate / 1_000_000) : "未知"
+        return "TVPlayer iOS 播放诊断\n线路: \(currentURLString.isEmpty ? "未知" : currentURLString)\n分辨率: \(diagnostics.resolutionText)\n输出/源帧率: \(String(format: "%.1f", diagnostics.currentVideoFrameRate)) / \(String(format: "%.1f", diagnostics.nominalVideoFrameRate)) fps\n累计丢帧: \(diagnostics.droppedVideoFrames)（最近 \(String(format: "%.1f", diagnostics.droppedFramesPerSecond)) 帧/秒）\n实际下载码率: \(observed)\n平均视频码率: \(averageVideo)\n标称码率: \(indicated)\n缓冲: \(String(format: "%.1f", diagnostics.bufferSeconds)) 秒\n卡顿: \(diagnostics.stallCount) 次\n播放状态: \(diagnostics.timeControlStatus)\n等待原因: \(diagnostics.waitingReason)\n缓冲可持续: \(diagnostics.isLikelyToKeepUp ? "是" : "否")\n诊断判断: \(diagnostics.assessment)\n最近状态: \(diagnostics.reason.isEmpty ? "未知" : diagnostics.reason)"
     }
 
     var onError: (() -> Void)?
@@ -164,6 +169,7 @@ final class PlayerEngine: ObservableObject {
         if let obs = timeObserver {
             player.removeTimeObserver(obs)
         }
+        diagnosticsTask?.cancel()
         cancellables.removeAll()
     }
 
@@ -207,6 +213,7 @@ final class PlayerEngine: ObservableObject {
 
             self.setupItemObserver(item, token: token)
             self.setupTimeObserver(token: token)
+            self.startLiveDiagnostics(token: token)
 
             if self.lineTimeoutEnabled {
                 self.armEvidenceDrivenWatch(token: token)
@@ -490,6 +497,8 @@ final class PlayerEngine: ObservableObject {
         evidenceTask = nil
         clearItemNotificationObservers()
         stopSpeedCheck()
+        diagnosticsTask?.cancel()
+        diagnosticsTask = nil
         player.replaceCurrentItem(with: nil)
         isPlaying = false
         isReady = false
@@ -528,6 +537,8 @@ final class PlayerEngine: ObservableObject {
         evidenceTask = nil
         clearItemNotificationObservers()
         stopSpeedCheck()
+        diagnosticsTask?.cancel()
+        diagnosticsTask = nil
         persistentNegativeScore = 0
         stallWatchEnabled = false
         continuousStall = false
@@ -546,6 +557,8 @@ final class PlayerEngine: ObservableObject {
         lastStallAt = .distantPast
         lastQualitySampleAt = .distantPast
         activePeakBitRate = 0
+        lastDiagnosticDroppedFrames = 0
+        lastDiagnosticSampleAt = .distantPast
         failureRecorded = false
         startupExtensionCount = 0
         diagnostics = PlaybackDiagnostics(bufferSeconds: Self.initialBufferSeconds)
@@ -837,14 +850,82 @@ final class PlayerEngine: ObservableObject {
     }
 
     private func updateDiagnostics(reason: String) {
+        refreshDiagnostics(reason: reason)
+    }
+
+    private func startLiveDiagnostics(token: Int) {
+        diagnosticsTask?.cancel()
+        diagnosticsTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard let self, !Task.isCancelled, self.playToken == token else { return }
+                self.refreshDiagnostics(reason: nil)
+            }
+        }
+    }
+
+    private func refreshDiagnostics(reason: String?) {
+        let item = player.currentItem
         let event = player.currentItem?.accessLog()?.events.last
+        let itemTracks = item?.tracks ?? []
+        let videoTrack = itemTracks.first {
+            $0.assetTrack?.mediaType == .video || $0.currentVideoFrameRate > 0
+        }
+        let currentFPS = Double(videoTrack?.currentVideoFrameRate ?? 0)
+        let nominalFPS = Double(videoTrack?.assetTrack?.nominalFrameRate ?? 0)
+        let size = item?.presentationSize ?? .zero
+        let droppedFrames = event?.numberOfDroppedVideoFrames ?? 0
+        let now = Date()
+        var dropRate = diagnostics.droppedFramesPerSecond
+        if lastDiagnosticSampleAt == .distantPast || droppedFrames < lastDiagnosticDroppedFrames {
+            dropRate = 0
+            lastDiagnosticDroppedFrames = droppedFrames
+            lastDiagnosticSampleAt = now
+        } else {
+            let elapsed = now.timeIntervalSince(lastDiagnosticSampleAt)
+            if elapsed >= 0.5 {
+                dropRate = Double(droppedFrames - lastDiagnosticDroppedFrames) / elapsed
+                lastDiagnosticDroppedFrames = droppedFrames
+                lastDiagnosticSampleAt = now
+            }
+        }
+
+        let controlStatus: String
+        switch player.timeControlStatus {
+        case .playing: controlStatus = "播放中"
+        case .paused: controlStatus = "暂停"
+        case .waitingToPlayAtSpecifiedRate: controlStatus = "等待"
+        @unknown default: controlStatus = "未知"
+        }
+
+        let waitingReason: String
+        switch player.reasonForWaitingToPlay {
+        case .toMinimizeStalls: waitingReason = "等待更多缓冲"
+        case .evaluatingBufferingRate: waitingReason = "评估网络速度"
+        case .noItemToPlay: waitingReason = "没有播放项"
+        case .none: waitingReason = "无"
+        default: waitingReason = player.reasonForWaitingToPlay?.rawValue ?? "未知"
+        }
+
         diagnostics = PlaybackDiagnostics(
             observedBitrate: event?.observedBitrate ?? 0,
             indicatedBitrate: event?.indicatedBitrate ?? 0,
-            stallCount: recentStalls.count,
+            averageVideoBitrate: event?.averageVideoBitrate ?? 0,
+            currentVideoFrameRate: currentFPS,
+            nominalVideoFrameRate: nominalFPS,
+            droppedVideoFrames: droppedFrames,
+            droppedFramesPerSecond: max(0, dropRate),
+            videoWidth: Int(size.width.rounded()),
+            videoHeight: Int(size.height.rounded()),
+            stallCount: max(recentStalls.count, event?.numberOfStalls ?? 0),
             bufferSeconds: currentBufferedSeconds(),
             peakBitRateLimit: activePeakBitRate,
-            reason: reason
+            timeControlStatus: controlStatus,
+            waitingReason: waitingReason,
+            isLikelyToKeepUp: item?.isPlaybackLikelyToKeepUp ?? false,
+            isBufferEmpty: item?.isPlaybackBufferEmpty ?? true,
+            playbackClockSeconds: CMTimeGetSeconds(item?.currentTime() ?? .zero),
+            reason: reason ?? diagnostics.reason
         )
     }
 
@@ -1140,24 +1221,85 @@ enum FusionVerdict {
 struct PlaybackDiagnostics: Equatable {
     var observedBitrate: Double
     var indicatedBitrate: Double
+    var averageVideoBitrate: Double
+    var currentVideoFrameRate: Double
+    var nominalVideoFrameRate: Double
+    var droppedVideoFrames: Int
+    var droppedFramesPerSecond: Double
+    var videoWidth: Int
+    var videoHeight: Int
     var stallCount: Int
     var bufferSeconds: TimeInterval
     var peakBitRateLimit: Double
+    var timeControlStatus: String
+    var waitingReason: String
+    var isLikelyToKeepUp: Bool
+    var isBufferEmpty: Bool
+    var playbackClockSeconds: TimeInterval
     var reason: String
+
+    var resolutionText: String {
+        videoWidth > 0 && videoHeight > 0 ? "\(videoWidth)×\(videoHeight)" : "未知"
+    }
+
+    var assessment: String {
+        if timeControlStatus == "等待" || isBufferEmpty {
+            return "网络或缓冲不足"
+        }
+        if nominalVideoFrameRate >= 15,
+           currentVideoFrameRate > 0,
+           currentVideoFrameRate < nominalVideoFrameRate * 0.55 {
+            return "视频输出帧率明显偏低"
+        }
+        if droppedFramesPerSecond >= 3, bufferSeconds >= 2, timeControlStatus == "播放中" {
+            return "AVPlayer 解码/渲染持续丢帧"
+        }
+        if droppedVideoFrames > 0 {
+            return "检测到视频丢帧，继续观察增长速度"
+        }
+        if timeControlStatus == "播放中", isLikelyToKeepUp {
+            return "当前指标正常"
+        }
+        return "正在收集数据"
+    }
 
     init(
         observedBitrate: Double = 0,
         indicatedBitrate: Double = 0,
+        averageVideoBitrate: Double = 0,
+        currentVideoFrameRate: Double = 0,
+        nominalVideoFrameRate: Double = 0,
+        droppedVideoFrames: Int = 0,
+        droppedFramesPerSecond: Double = 0,
+        videoWidth: Int = 0,
+        videoHeight: Int = 0,
         stallCount: Int = 0,
         bufferSeconds: TimeInterval = 0,
         peakBitRateLimit: Double = 0,
+        timeControlStatus: String = "未开始",
+        waitingReason: String = "无",
+        isLikelyToKeepUp: Bool = false,
+        isBufferEmpty: Bool = true,
+        playbackClockSeconds: TimeInterval = 0,
         reason: String = ""
     ) {
         self.observedBitrate = observedBitrate
         self.indicatedBitrate = indicatedBitrate
+        self.averageVideoBitrate = averageVideoBitrate
+        self.currentVideoFrameRate = currentVideoFrameRate
+        self.nominalVideoFrameRate = nominalVideoFrameRate
+        self.droppedVideoFrames = droppedVideoFrames
+        self.droppedFramesPerSecond = droppedFramesPerSecond
+        self.videoWidth = videoWidth
+        self.videoHeight = videoHeight
         self.stallCount = stallCount
         self.bufferSeconds = bufferSeconds
         self.peakBitRateLimit = peakBitRateLimit
+        self.timeControlStatus = timeControlStatus
+        self.waitingReason = waitingReason
+        self.isLikelyToKeepUp = isLikelyToKeepUp
+        self.isBufferEmpty = isBufferEmpty
+        self.playbackClockSeconds = playbackClockSeconds
         self.reason = reason
     }
 }
