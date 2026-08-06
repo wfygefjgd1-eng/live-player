@@ -158,7 +158,7 @@ struct ContentView: View {
                 }
                 .allowsHitTesting(false)
 
-                if vm.player.shouldShowDiagnostics {
+                if vm.showDiagnosticsOverlay || vm.player.shouldShowDiagnostics {
                     VStack {
                         HStack {
                             Spacer(minLength: 0)

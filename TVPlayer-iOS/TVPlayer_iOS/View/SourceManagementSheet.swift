@@ -105,6 +105,10 @@ struct SourceManagementSheet: View {
                     }
 
                     Section {
+                        Toggle(isOn: $vm.showDiagnosticsOverlay) {
+                            Label("实时检测状态", systemImage: "waveform.path.ecg.rectangle")
+                        }
+
                         Button {
                             vm.refreshLatestLineup()
                             dismiss()

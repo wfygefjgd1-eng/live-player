@@ -2,6 +2,47 @@ import AVFoundation
 import UIKit
 import KSPlayer
 
+private final class TVKSOptions: KSOptions {
+    override func videoFrameMaxCount(fps: Float, naturalSize: CGSize, isLive: Bool) -> UInt8 {
+        // Four frames is too small for a 10-second HLS segment and makes the
+        // audio clock force-drop video while software deinterlacing catches up.
+        return isLive ? 12 : super.videoFrameMaxCount(fps: fps, naturalSize: naturalSize, isLive: isLive)
+    }
+
+    override func process(assetTrack: some MediaPlayerTrack) {
+        guard assetTrack.mediaType == .video else {
+            super.process(assetTrack: assetTrack)
+            return
+        }
+
+        // Keep interlaced H.264 on VideoToolbox. KSPlayer's default process()
+        // disables hardware decoding before adding yadif, which is the source
+        // of the 12.8 fps CPU-bound path for this stream.
+        let interlaced = [FFmpegFieldOrder.bb, .bt, .tt, .tb].contains(assetTrack.fieldOrder)
+        if interlaced, assetTrack.nominalFrameRate > 0, assetTrack.nominalFrameRate < 20 {
+            assetTrack.nominalFrameRate = 25
+        }
+        hardwareDecode = true
+        asynchronousDecompression = true
+        videoFilters.removeAll { $0.contains("yadif") || $0.contains("idet") }
+    }
+
+    override func isUseDisplayLayer() -> Bool {
+        false
+    }
+
+    override func videoClockSync(main: KSClock, nextVideoTime: TimeInterval, fps: Double, frameCount: Int) -> (Double, ClockProcessType) {
+        let desired = main.getTime() - videoDelay
+        let diff = nextVideoTime - desired
+        // Do not drop every other frame for small audio-clock jitter. Only
+        // discard frames after a clearly unrecoverable video lag.
+        if diff > -0.8 {
+            return (diff, .next)
+        }
+        return super.videoClockSync(main: main, nextVideoTime: nextVideoTime, fps: fps, frameCount: frameCount)
+    }
+}
+
 /// KSPlayer-only playback backend. KSMEPlayer is selected directly so the
 /// system AVPlayer is never used as an automatic fallback.
 @MainActor
@@ -61,22 +102,16 @@ final class KSPlaybackEngine: NSObject {
         KSOptions.preferredFrame = true
         KSOptions.yadifMode = 0
 
-        let options = KSOptions()
+        let options = TVKSOptions()
         options.userAgent = "Mozilla/5.0 (iPhone; CPU iOS 17_0 like Mac OS X)"
         options.preferredForwardBufferDuration = isLongSegmentSource(url) ? 8 : 3
         options.maxBufferDuration = isLongSegmentSource(url) ? 24 : 15
         options.registerRemoteControll = false
-        options.autoDeInterlace = true
+        options.autoDeInterlace = false
         options.videoAdaptable = false
 
-        if isLongSegmentSource(url) {
-            options.hardwareDecode = false
-            options.asynchronousDecompression = false
-            options.autoDeInterlace = false
-            // One output frame per input frame. mode=1 doubles the work to
-            // 50 fps and made 1080i software decoding miss its 25 fps target.
-            options.videoFilters = ["yadif=mode=0:parity=-1:deint=1"]
-        }
+        options.hardwareDecode = true
+        options.asynchronousDecompression = true
 
         let layer = KSPlayerLayer(
             url: url,
@@ -97,7 +132,18 @@ final class KSPlaybackEngine: NSObject {
     }
 
     func resume() {
+        try? AVAudioSession.sharedInstance().setActive(true)
         layer?.play()
+    }
+
+    func resync() {
+        guard let layer else { return }
+        let url = layer.url
+        try? AVAudioSession.sharedInstance().setActive(true)
+        // A live stream has no reliable seekable timeline. Recreating the
+        // KSPlayer layer flushes both audio/video queues and rebuilds the
+        // VideoToolbox session, which is the effective live-stream resync.
+        play(url: url, volume: requestedVolume)
     }
 
     func stop() {

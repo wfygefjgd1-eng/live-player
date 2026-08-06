@@ -155,6 +155,7 @@ final class PlayerEngine: ObservableObject {
     private var ksLastClock: TimeInterval = 0
     private var ksLastClockAt: Date = .distantPast
     private var ksFailureReported = false
+    private var ksResyncAttempts = 0
 
     init() {
         player.actionAtItemEnd = .none
@@ -807,6 +808,7 @@ final class PlayerEngine: ObservableObject {
         ksLastClock = 0
         ksLastClockAt = .distantPast
         ksFailureReported = false
+        ksResyncAttempts = 0
         shouldShowDiagnostics = false
         diagnostics = PlaybackDiagnostics(
             bufferSeconds: Self.initialBufferSeconds,
@@ -1260,10 +1262,10 @@ final class PlayerEngine: ObservableObject {
         ksLastClock = sample.playbackClockSeconds
 
         let persistentDrop = dropRate >= 5
-        let severeFrame = ksLowFrameSamples >= 3
-        let severeSync = ksBadSyncSamples >= 3
-        let severeStall = ksStallSamples >= 2
-        let severeBuffering = ksBufferingSamples >= 2
+        let severeFrame = ksLowFrameSamples >= 4
+        let severeSync = ksBadSyncSamples >= 4
+        let severeStall = ksStallSamples >= 3
+        let severeBuffering = ksBufferingSamples >= 3
         let needsAttention = buffering || persistentDrop || ksLowFrameSamples >= 2
             || ksBadSyncSamples >= 2 || severeStall
 
@@ -1309,6 +1311,15 @@ final class PlayerEngine: ObservableObject {
             shouldShowDiagnostics = true
         } else if ksHealthySamples >= 2 {
             shouldShowDiagnostics = false
+        }
+
+        if severeSync, ksResyncAttempts < 2 {
+            ksResyncAttempts += 1
+            ksBadSyncSamples = 0
+            ksLowFrameSamples = 0
+            ksEngine.resync()
+            diagnostics.reason = "正在重新对齐音画时钟"
+            return
         }
 
         if lineTimeoutEnabled, isReady, !ksFailureReported,

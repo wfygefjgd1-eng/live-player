@@ -17,7 +17,7 @@ let LATEST_LINEUP_URLS: [String] = [
 private let CHANNEL_OSD_MS: UInt64 = 2_500_000_000
 private let INDICATOR_MS: UInt64 = 1_200_000_000
 /// 自动换线冷却：防止连续失败瞬间连跳
-private let AUTO_SWITCH_COOLDOWN_NS: UInt64 = 500_000_000
+private let AUTO_SWITCH_COOLDOWN_NS: UInt64 = 2_000_000_000
 /// 无声判定冷却（秒级防抖）
 private let SILENT_AUDIO_GRACE_NS: UInt64 = 10_000_000_000
 /// 连续自动 hop 频道上限（线都试完才 hop）
@@ -69,6 +69,8 @@ final class PlayerViewModel: ObservableObject {
     @Published var isBootstrapping = false
     @Published var bootstrapMessage = "正在连接网络..."
     @Published var playerLayoutEpoch: Int = 0
+    /// 实时检测状态面板默认关闭；打开后持续显示，异常时即使关闭也会短暂提示。
+    @Published var showDiagnosticsOverlay = false
     /// 页面实时诊断浮层，可在来源管理中关闭。
     /// 正在从 GitHub 拉取官方最新线路
     @Published var isRefreshingLatest = false
@@ -964,7 +966,7 @@ final class PlayerViewModel: ObservableObject {
             }
 
             if lineTimeoutEnabled {
-                let result = await LineSpeedTester.shared.quickPreflight(raw, timeout: 1.8)
+                let result = await LineSpeedTester.shared.quickPreflight(raw, timeout: 2.2)
                 guard !Task.isCancelled, playGeneration == gen else { return }
                 guard currentChannel?.key == ch.key else { return }
                 if lineTimeoutEnabled && result == .hardFail {
