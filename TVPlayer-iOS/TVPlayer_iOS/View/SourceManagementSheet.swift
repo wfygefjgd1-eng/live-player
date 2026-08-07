@@ -156,15 +156,15 @@ struct SourceManagementSheet: View {
 
                     Section {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("TV go 2.0")
+                            Text("TV go 2.2")
                                 .font(.headline)
-                            Text("• 使用系统 AVPlayerViewController 作为轻量视频渲染层")
-                            Text("• 不再内置 VLC，安装包恢复轻量体积")
+                            Text("• 播放内核为 libmpv（MPVKit），AVPlayer 仅在 mpv 起播失败时自动兜底")
+                            Text("• Metal 渲染路径（gpu-next + Vulkan/MoltenVK），支持 10bit/HDR 与 VideoToolbox 硬解")
+                            Text("• 兼容 AVS2/AVS3、HEVC 10bit 50fps、非标 HLS 等 AVPlayer 难以播放的格式")
                             Text("• 仅在缓冲、低帧率、持续丢帧或音画不同步时显示实时诊断")
                             Text("• 每次进入 App 都重新加载当前选中的来源")
                             Text("• 可复制包含全部实时指标的播放诊断，方便比较问题来源与正常来源")
                             Text("• 保留自动切换线路、失败线路黑名单和线路质量记忆")
-                            Text("• 支持系统原生 HLS/HTTP 直播线路")
                             Text("• 支持自定义来源、收藏频道、隐藏线路和后台音频播放")
                         }
                         .font(.caption)

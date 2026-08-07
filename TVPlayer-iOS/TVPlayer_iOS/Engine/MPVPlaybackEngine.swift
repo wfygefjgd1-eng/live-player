@@ -424,12 +424,27 @@ final class MPVPlaybackEngine {
     }
 }
 
+/// 自定义 CAMetalLayer 子类：拦截 MoltenVK 把 drawableSize 写成 1x1 的已知缺陷。
+/// MoltenVK 在强制完成 presentation 时会临时将 drawableSize 置为 1x1，若不拦截会
+/// 导致画面被渲染到 1 像素的表面上 → 黑屏 / 画面不可见（mpv PR #13651）。
+/// 官方 MPVKit Demo-iOS 同样使用该 workaround。
+final class MetalLayer: CAMetalLayer {
+    override var drawableSize: CGSize {
+        get { return super.drawableSize }
+        set {
+            if Int(newValue.width) > 1 && Int(newValue.height) > 1 {
+                super.drawableSize = newValue
+            }
+        }
+    }
+}
+
 /// CAMetalLayer 画面宿主：mpv 的 --wid 直接渲染进该 layer。
 /// drawableSize 必须跟随 bounds 与屏幕缩放，否则旋转/横屏后画面尺寸错误。
 final class MPVMetalHostView: UIView {
-    override class var layerClass: AnyClass { CAMetalLayer.self }
+    override class var layerClass: AnyClass { MetalLayer.self }
 
-    var metalLayer: CAMetalLayer { layer as! CAMetalLayer }
+    var metalLayer: MetalLayer { layer as! MetalLayer }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
