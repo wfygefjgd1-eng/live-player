@@ -160,9 +160,8 @@ struct ContentView: View {
                 // 左上角常驻实时网速 + 切台反馈
                 VStack {
                     HStack {
-                        NetworkSpeedBadge(speedKBps: vm.player.observedSpeedKBps)
-                        if vm.player.isSwitching {
-                            SwitchingBadge()
+                        if !vm.player.isSwitching && vm.player.observedSpeedKBps > 0 {
+                            NetworkSpeedBadge(speedKBps: vm.player.observedSpeedKBps)
                         }
                         Spacer(minLength: 0)
                     }
@@ -171,6 +170,27 @@ struct ContentView: View {
                     Spacer(minLength: 0)
                 }
                 .allowsHitTesting(false)
+
+                // 切台中：屏幕中央转圈 + 实时网速
+                if vm.player.isSwitching {
+                    VStack(spacing: 10) {
+                        ProgressView()
+                            .controlSize(.large)
+                            .tint(.white)
+                        Text(speedText(vm.player.observedSpeedKBps))
+                            .font(.system(size: 22, weight: .bold, design: .monospaced))
+                            .monospacedDigit()
+                            .foregroundColor(.white)
+                        Text("切换中")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(.white.opacity(0.7))
+                    }
+                    .padding(.horizontal, 28)
+                    .padding(.vertical, 20)
+                    .background(Color.black.opacity(0.65))
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .allowsHitTesting(false)
+                }
 
                 if vm.showDiagnosticsOverlay || vm.player.shouldShowDiagnostics {
                     VStack {
@@ -216,6 +236,12 @@ struct ContentView: View {
         root.setNeedsUpdateOfScreenEdgesDeferringSystemGestures()
         root.setNeedsStatusBarAppearanceUpdate()
         (root as? FullScreenRootController)?.refreshSystemChrome()
+    }
+
+    private func speedText(_ speedKBps: Double) -> String {
+        if speedKBps >= 1024 { return String(format: "%.1f MB/s", speedKBps / 1024) }
+        if speedKBps > 0 { return String(format: "%.0f KB/s", speedKBps) }
+        return "--"
     }
 
     private func longPressGesture() -> some Gesture {
@@ -371,26 +397,6 @@ private struct NetworkSpeedBadge: View {
         if speedKBps >= 1024 { return String(format: "%.1f MB/s", speedKBps / 1024) }
         if speedKBps > 0 { return String(format: "%.0f KB/s", speedKBps) }
         return "--"
-    }
-}
-
-/// 切台/切线路反馈：识别到切换动作即出现，出画后消失
-private struct SwitchingBadge: View {
-    var body: some View {
-        HStack(spacing: 6) {
-            ProgressView()
-                .controlSize(.small)
-                .tint(.white)
-            Text("正在切换")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(.white)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(Color.black.opacity(0.55))
-        .clipShape(Capsule())
-        .overlay(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 0.5))
-        .transition(.opacity)
     }
 }
 

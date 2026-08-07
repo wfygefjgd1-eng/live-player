@@ -99,12 +99,13 @@ final class PlayerEngine: ObservableObject {
     private var consecutiveBufferSeconds: Double = 0
     private var lowSpeedReported = false
 
-    /// EMA-smoothed download speed (KB/s) for stable UI speed display
-    private var smoothedSpeedKBps: Double = 0
-    private let smoothingAlpha: Double = 0.25
     /// 最近一次有效网速采样的时间：超时（3s 无新数据）即归零，避免显示过期速度
     private var lastValidSpeedSampleAt: Date = .distantPast
     private let speedStaleTimeout: TimeInterval = 3.0
+
+    /// 切台最小展示时长：防止快速源出画太快导致转圈一闪而过
+    private var switchStartedAt: Date = .distantPast
+    static let minSwitchDisplayTime: TimeInterval = 0.8
 
     @Published var isReady = false
     @Published var isPlaying = false
@@ -211,7 +212,7 @@ final class PlayerEngine: ObservableObject {
         isReady = false
         isPlaying = true
         isSwitching = true
-        smoothedSpeedKBps = 0
+        switchStartedAt = Date()
         lastValidSpeedSampleAt = .distantPast
 
         if Self.requiresMPV(url) {
@@ -400,7 +401,18 @@ final class PlayerEngine: ObservableObject {
         isPlaying = true
         guard !isReady else { return }
         isReady = true
-        isSwitching = false
+        // 确保转圈至少显示 minSwitchDisplayTime：快速源出画太快也要让用户看到反馈
+        let elapsed = Date().timeIntervalSince(switchStartedAt)
+        let remaining = Self.minSwitchDisplayTime - elapsed
+        if remaining > 0 {
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
+                guard let self else { return }
+                self.isSwitching = false
+            }
+        } else {
+            isSwitching = false
+        }
         diagnostics.timeControlStatus = "播放中"
         diagnostics.waitingReason = "无"
         diagnostics.isBufferEmpty = false
@@ -512,7 +524,6 @@ final class PlayerEngine: ObservableObject {
         shouldShowDiagnostics = false
         stallWatchEnabled = false
         failureRecorded = false
-        smoothedSpeedKBps = 0
         lastValidSpeedSampleAt = .distantPast
         observedSpeedKBps = 0
     }
@@ -677,16 +688,17 @@ final class PlayerEngine: ObservableObject {
         }
     }
 
-    /// 统一网速平滑入口：rawKBps>0 时更新 EMA；连续 3s 无新数据则归零
+    /// 直接显示原始网速（mpv cache-speed 已内部平滑，AVPlayer 取分片瞬时值），
+    /// 连续 3s 无新数据才归零——不叠加额外 EMA，避免双重平滑导致滞后。
     private func updateSpeed(rawKBps: Double) {
         let now = Date()
         if rawKBps > 0 {
-            smoothedSpeedKBps = smoothedSpeedKBps * (1 - smoothingAlpha) + rawKBps * smoothingAlpha
+            observedSpeedKBps = rawKBps
             lastValidSpeedSampleAt = now
         } else if now.timeIntervalSince(lastValidSpeedSampleAt) > speedStaleTimeout {
-            smoothedSpeedKBps = 0
+            observedSpeedKBps = 0
         }
-        observedSpeedKBps = smoothedSpeedKBps
+        // rawKBps==0 且未超时：保持上次值不变
     }
 
     private func refreshDiagnostics(reason: String?) {
@@ -694,10 +706,9 @@ if activeBackend == .mpv {
             let sample = mpvEngine.diagnosticsSample()
             // 实时下载速度：cache-speed = 缓存实时填充速率（KB/s），
             // demux bitrate 是长时间滑动均值，长分片源在分片下载间歇会掉到 0。
-            let rawKBps = sample.cacheSpeedKBps
-            updateSpeed(rawKBps: rawKBps)
+            updateSpeed(rawKBps: sample.cacheSpeedKBps)
             diagnostics = PlaybackDiagnostics(
-                observedBitrate: smoothedSpeedKBps * 1024 * 8,
+                observedBitrate: observedSpeedKBps * 1024 * 8,
                 averageVideoBitrate: sample.averageVideoBitrate,
                 currentVideoFrameRate: sample.outputFrameRate,
                 nominalVideoFrameRate: sample.nominalFrameRate,
@@ -756,7 +767,7 @@ if activeBackend == .mpv {
         let videoTrack = item.tracks.first { $0.assetTrack?.mediaType == .video }?.assetTrack
 
         diagnostics = PlaybackDiagnostics(
-            observedBitrate: smoothedSpeedKBps * 1024 * 8,
+            observedBitrate: observedSpeedKBps * 1024 * 8,
             averageVideoBitrate: Double(bitrate),
             currentVideoFrameRate: 0,
             nominalVideoFrameRate: videoTrack.map { Double($0.nominalFrameRate) } ?? 0,
