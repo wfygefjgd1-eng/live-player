@@ -22,9 +22,6 @@ final class PlayerEngine: ObservableObject {
     static let readyProtectNs: UInt64 = 4_000_000_000
     static let progressStallThreshold: TimeInterval = 8.0
 
-    static let minUsefulSpeedKBps: Double = 5
-    static let deadSpeedKBps: Double = 0.8
-
     /// mpv 起播超时；慢 HLS 长分片源单独放宽（见 startupTimeoutNs(for:)）
     static let mpvStartupTimeoutNs: UInt64 = 25_000_000_000
     static let mpvSlowSourceTimeoutNs: UInt64 = 40_000_000_000
@@ -80,6 +77,8 @@ final class PlayerEngine: ObservableObject {
     private var diagnosticsTask: Task<Void, Never>?
     private var stallCheckTask: Task<Void, Never>?
     private var avDiagnosticsTask: Task<Void, Never>?
+    /// 诊断浮层异常短暂提示的自动隐藏任务
+    private var diagnosticsDismissTask: Task<Void, Never>?
 
     private var memoryWarningObserver: NSObjectProtocol?
     private var renderedObserver: NSObjectProtocol?
@@ -99,13 +98,18 @@ final class PlayerEngine: ObservableObject {
     private var consecutiveBufferSeconds: Double = 0
     private var lowSpeedReported = false
 
-    /// 最近一次有效网速采样的时间：超时（3s 无新数据）即归零，避免显示过期速度
+    /// 最近一次有效网速采样的时间：超时（1.5s 无新数据）即归零，避免显示过期速度。
+    /// 太短会因直播分片间隙抖动闪烁，太长会掩盖断网；0.5s 采样 × 3 拍为界。
     private var lastValidSpeedSampleAt: Date = .distantPast
-    private let speedStaleTimeout: TimeInterval = 3.0
+    private let speedStaleTimeout: TimeInterval = 1.5
 
     /// 切台最小展示时长：防止快速源出画太快导致转圈一闪而过
     private var switchStartedAt: Date = .distantPast
     static let minSwitchDisplayTime: TimeInterval = 0.8
+
+    /// AVPlayer 累计字节追踪（用于计算真实瞬时下载速度）
+    private var lastAVTotalBytes: Int64 = 0
+    private var lastAVSampleTime: Date = .distantPast
 
     @Published var isReady = false
     @Published var isPlaying = false
@@ -133,7 +137,6 @@ final class PlayerEngine: ObservableObject {
     var onError: (() -> Void)?
     var onReady: (() -> Void)?
     var onStartupTimeout: (() -> Void)?
-    var onSilentAudio: (() -> Void)?
     /// 网速过低/无数据触发换线
     var onLowSpeed: ((String) -> Void)?
 
@@ -190,6 +193,7 @@ final class PlayerEngine: ObservableObject {
         mpvStartupTask?.cancel()
         avStartupTask?.cancel()
         avDiagnosticsTask?.cancel()
+        diagnosticsDismissTask?.cancel()
         cancellables.removeAll()
     }
 
@@ -517,6 +521,8 @@ final class PlayerEngine: ObservableObject {
         diagnosticsTask = nil
         avDiagnosticsTask?.cancel()
         avDiagnosticsTask = nil
+        diagnosticsDismissTask?.cancel()
+        diagnosticsDismissTask = nil
         currentURL = nil
         isPlaying = false
         isReady = false
@@ -541,14 +547,6 @@ final class PlayerEngine: ObservableObject {
         }
     }
 
-    /// 当前播放地址是否有可用的声音轨
-    var hasActiveAudioTrack: Bool {
-        if activeBackend == .mpv {
-            return mpvEngine.hasAudioTrack
-        }
-        return avItem?.tracks.contains { $0.assetTrack?.mediaType == .audio } ?? false
-    }
-
     // MARK: - Private — State Management
 
     private func resetState(for token: Int) {
@@ -562,6 +560,8 @@ final class PlayerEngine: ObservableObject {
         diagnosticsTask = nil
         avDiagnosticsTask?.cancel()
         avDiagnosticsTask = nil
+        diagnosticsDismissTask?.cancel()
+        diagnosticsDismissTask = nil
         recentStalls.removeAll()
         lastStallAt = .distantPast
         failureRecorded = false
@@ -689,7 +689,7 @@ final class PlayerEngine: ObservableObject {
     }
 
     /// 直接显示原始网速（mpv cache-speed 已内部平滑，AVPlayer 取分片瞬时值），
-    /// 连续 3s 无新数据才归零——不叠加额外 EMA，避免双重平滑导致滞后。
+    /// 连续 1.5s 无新数据才归零——不叠加额外 EMA，避免双重平滑导致滞后。
     private func updateSpeed(rawKBps: Double) {
         let now = Date()
         if rawKBps > 0 {
@@ -701,8 +701,29 @@ final class PlayerEngine: ObservableObject {
         // rawKBps==0 且未超时：保持上次值不变
     }
 
+    /// 标记异常并短暂显示诊断浮层（即使设置里关闭了常驻浮层）。
+    /// 仅「真实异常」触发：持续缓冲/无数据、解码丢帧明显、音画不同步等，
+    /// 正常播放/稳定卡顿时不弹。自动隐藏由 diagnosticsDismissTask 调度。
+    private func flagDiagnosticsForReason(_ reason: String?) {
+        guard let reason, !reason.isEmpty else { return }
+        let isAnomaly = reason.contains("卡顿") || reason.contains("缓冲")
+            || reason.contains("无数据") || reason.contains("丢帧")
+            || reason.contains("不足") || reason.contains("低帧")
+            || reason.contains("同步") || reason.contains("错误")
+            || reason.contains("中止") || reason.contains("失败")
+        guard isAnomaly else { return }
+        shouldShowDiagnostics = true
+        diagnosticsDismissTask?.cancel()
+        diagnosticsDismissTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            guard let self, !Task.isCancelled else { return }
+            self.shouldShowDiagnostics = false
+        }
+    }
+
     private func refreshDiagnostics(reason: String?) {
-if activeBackend == .mpv {
+        flagDiagnosticsForReason(reason)
+        if activeBackend == .mpv {
             let sample = mpvEngine.diagnosticsSample()
             // 实时下载速度：cache-speed = 缓存实时填充速率（KB/s），
             // demux bitrate 是长时间滑动均值，长分片源在分片下载间歇会掉到 0。
@@ -727,6 +748,7 @@ if activeBackend == .mpv {
                 reason: reason ?? diagnostics.reason
             )
         }
+        // AVPlayer 分支的 diagnostics/网速由 sampleAVDiagnostics() 采样维护，此处无需处理。
     }
 
     // MARK: - AVPlayer 轻量采样（0.5s，主线程安全）
@@ -747,13 +769,27 @@ if activeBackend == .mpv {
         guard let item = avItem else { return }
         let log = item.accessLog()
         let event = log?.events.last
-        // 最近分片真实下载速度 = 累计字节数 / 累计耗时（随下载过程持续更新，
-        // 比分片级均值 observedBitrate 更实时）
+        // 实时网速：对 AVPlayer 的累计已传输字节数做差分（本次采样 - 上次采样）/ 时间差。
+        // 这才是真正的「瞬时」下载速度；而 event.transferDuration / numberOfBytesTransferred
+        // 是从分片开始到现在的累计均值，直播中网络一波动该均值几乎不动，导致网速「不实时」。
+        let totalBytes = Double(event?.numberOfBytesTransferred ?? 0)
+        let now = Date()
+        var instantKBps = 0.0
+        if totalBytes >= Double(lastAVTotalBytes), lastAVSampleTime != .distantPast {
+            let dt = now.timeIntervalSince(lastAVSampleTime)
+            let dBytes = totalBytes - Double(lastAVTotalBytes)
+            if dt > 0.05 && dBytes > 0 {
+                instantKBps = dBytes / 1024 / dt
+            }
+        }
+        lastAVTotalBytes = Int64(totalBytes)
+        lastAVSampleTime = now
+        // 分片边界重置累计计数器时（新分片字节数比上次小），退化为短窗均值兜底
         let transferDuration = event?.transferDuration ?? 0
-        let transferredBytes = Double(event?.numberOfBytesTransferred ?? 0)
-        let instantKBps = transferDuration > 0.05 ? transferredBytes / 1024 / transferDuration : 0
+        let shortAvgKBps = transferDuration > 0.05 && transferDuration < 5
+            ? (Double(event?.numberOfBytesTransferred ?? 0)) / 1024 / transferDuration : 0
         let fallbackKBps = (event?.observedBitrate ?? 0) > 0 ? (event?.observedBitrate ?? 0) / 8 / 1024 : 0
-        updateSpeed(rawKBps: instantKBps > 0 ? instantKBps : fallbackKBps)
+        updateSpeed(rawKBps: instantKBps > 0 ? instantKBps : (shortAvgKBps > 0 ? shortAvgKBps : fallbackKBps))
         let bitrate = event?.indicatedBitrate ?? 0
         let size = item.presentationSize
         let ranges = item.loadedTimeRanges

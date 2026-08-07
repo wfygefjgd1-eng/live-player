@@ -17,9 +17,6 @@ final class NetworkMonitor {
     /// 是否使用蜂窝网络（可能需要节省流量）
     var isCellular: Bool { connectionType == .cellular }
 
-    /// 是否 WiFi
-    var isWiFi: Bool { connectionType == .wifi }
-
     enum ConnectionType {
         case wifi
         case cellular
@@ -84,12 +81,5 @@ final class NetworkMonitor {
                 self.onConnectionTypeChanged?(self.connectionType)
             }
         }
-    }
-
-    // 🆕 停止监听（供清理使用）
-    func stop() {
-        monitor.cancel()
-        onSatisfied = nil
-        onConnectionTypeChanged = nil
     }
 }

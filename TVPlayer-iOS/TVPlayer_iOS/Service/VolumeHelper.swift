@@ -103,10 +103,4 @@ enum VolumeHelper {
     static func adjust(by delta: Float) {
         setVolume(current + delta)
     }
-
-    /// 触觉反馈（用于音量调节时）
-    static func hapticFeedback() {
-        let generator = UIImpactFeedbackGenerator(style: .soft)
-        generator.impactOccurred(intensity: 0.5)
-    }
 }

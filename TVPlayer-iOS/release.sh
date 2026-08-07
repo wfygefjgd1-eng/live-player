@@ -29,10 +29,10 @@ fi
 echo "推送代码..."
 git push origin main
 
-# 创建并推送 tag
+# 创建并推送 tag（不强制覆盖：若 tag 已存在则报错终止，避免覆盖线上历史）
 echo "创建 tag: $VERSION"
-git tag -f "$VERSION"
-git push origin "$VERSION" --force
+git tag "$VERSION"
+git push origin "$VERSION"
 
 echo ""
 echo "=== Tag 已推送，等待 GitHub Actions 构建完成 ==="

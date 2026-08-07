@@ -12,12 +12,14 @@ class M3UParserService {
     )
 
     static func parse(_ text: String) -> [Channel] {
-        guard !text.isEmpty else { return [] }
+        // 剥离 UTF-8 BOM：带 BOM 的源首行 hasPrefix("#EXTINF:") 会失败，导致首个频道丢失
+        let cleaned = text.hasPrefix("\u{FEFF}") ? String(text.dropFirst()) : text
+        guard !cleaned.isEmpty else { return [] }
         var channels = OrderedDictionary<String, Channel>()
         var pendingName: String? = nil
         var pendingGroup = "未分组"
 
-        let lines = text.components(separatedBy: .newlines)
+        let lines = cleaned.components(separatedBy: .newlines)
         for raw in lines {
             let line = raw.trimmingCharacters(in: .whitespaces)
             if line.hasPrefix("#EXTINF:") {
@@ -27,7 +29,19 @@ class M3UParserService {
                 if let n = namePattern.firstMatch(in: line), n.count > 1 {
                     pendingName = n[1]
                 }
+            } else if line.hasPrefix("#EXTGRP:") {
+                // 部分源用 #EXTGRP 标记分组，优先于 #EXTINF 里可能缺失的 group-title
+                let groupName = line.dropFirst("#EXTGRP:".count).trimmingCharacters(in: .whitespaces)
+                if !groupName.isEmpty {
+                    pendingGroup = groupName
+                }
             } else if !line.isEmpty, !line.hasPrefix("#"), let name = pendingName {
+                // 脏源（HTML 误解析、js 脚本行）里的非 URL 行不灌进频道列表
+                guard isValidMediaURL(line) else {
+                    pendingName = nil
+                    pendingGroup = "未分组"
+                    continue
+                }
                 let display = normalizeDisplayName(name)
                 let key = normalizeName(display)
                 // 央视统一进「央视」分组，避免 CCTV-15/17 落在未分组
@@ -45,6 +59,18 @@ class M3UParserService {
             }
         }
         return Array(channels.values)
+    }
+
+    /// URL 合法性校验：必须是 http/https 且有可解析的主机名。
+    /// 注：此处过滤脏数据，但不过度约束——rtmp/rtsp 等非标准协议仍保留给其他路径。
+    private static func isValidMediaURL(_ raw: String) -> Bool {
+        guard let url = URL(string: raw),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              url.host != nil else {
+            return false
+        }
+        return true
     }
 
     static func isCCTVKey(_ key: String) -> Bool {

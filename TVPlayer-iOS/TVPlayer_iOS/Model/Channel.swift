@@ -95,8 +95,11 @@ struct Channel: Codable, Identifiable, Equatable, Hashable {
 
     // MARK: - Equatable
 
+    /// 相等性只看 key：与 hash(into:) 保持一致，满足 Hashable 契约
+    /// （== 相同 ⇒ hash 相同 且 hash 相同 ⇒ == 相同）。
+    /// 频道身份由其 key 唯一确定，name/group 只是展示字段。
     static func == (lhs: Channel, rhs: Channel) -> Bool {
-        lhs.key == rhs.key && lhs.urls == rhs.urls && lhs.name == rhs.name
+        lhs.key == rhs.key
     }
 
     /// 合并两个同名频道的 URL

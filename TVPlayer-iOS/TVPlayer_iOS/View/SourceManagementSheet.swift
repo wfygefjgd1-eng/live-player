@@ -156,7 +156,7 @@ struct SourceManagementSheet: View {
 
                     Section {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("TV go 2.3")
+                            Text("TV go 2.3.8")
                                 .font(.headline)
                             Text("• 播放内核为系统 AVPlayer（iPhone 原生最稳定、零体积），绝大多数来源直接播放")
                             Text("• live.264788.xyz 等特殊长分片/隔行源自动使用 libmpv（软件解码 + 去隔行）")

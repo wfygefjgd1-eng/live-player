@@ -94,29 +94,6 @@ final class StorageService {
         }
     }
 
-    /// 快速检查是否有缓存（不加载全部数据）
-    func hasCachedChannels() -> Bool {
-        queue.sync {
-            guard defaults.data(forKey: kChannels) != nil else { return false }
-            if let metaData = defaults.data(forKey: kChannelsMeta),
-               let meta = try? JSONDecoder().decode(ChannelsMeta.self, from: metaData) {
-                return meta.count > 0
-            }
-            return true
-        }
-    }
-
-    /// 缓存是否过期（超过 24h 返回 true）
-    func isCacheStale(maxAge: TimeInterval = 86400) -> Bool {
-        queue.sync {
-            if let metaData = defaults.data(forKey: kChannelsMeta),
-               let meta = try? JSONDecoder().decode(ChannelsMeta.self, from: metaData) {
-                return Date().timeIntervalSince(meta.updatedAt) > maxAge
-            }
-            return true
-        }
-    }
-
     // MARK: - 数据迁移
 
     private func migrateData(from oldVersion: Int) {
@@ -162,12 +139,6 @@ final class StorageService {
         }
     }
 
-    func loadCustomSourceUrl() -> String {
-        queue.sync {
-            defaults.string(forKey: kCustomSource) ?? ""
-        }
-    }
-
     // MARK: - 隐藏线路
 
     func loadHiddenLines() -> Set<String> {
@@ -191,13 +162,6 @@ final class StorageService {
         queue.sync {
             let lines = Set(defaults.stringArray(forKey: kHiddenLines) ?? [])
             return lines.contains(url.trimmingCharacters(in: .whitespaces))
-        }
-    }
-
-    func unhideAllLines() {
-        queue.async(flags: .barrier) { [weak self] in
-            guard let self else { return }
-            self.defaults.removeObject(forKey: self.kHiddenLines)
         }
     }
 

@@ -114,6 +114,37 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         } catch {
             print("Audio session setup failed: \(error)")
         }
+        // 监听音频中断（来电/闹钟/Siri 等）：转发为业务通知，
+        // 由 PlayerViewModel.noteInterruptionBegan/Ended 负责在结束后自动恢复播放。
+        // 中断通知的 userInfo 里 AVAudioSessionInterruptionTypeKey 区分 .began/.ended；
+        // 还有 AVAudioSessionInterruptionOptionShouldResumeKey 指示系统是否建议恢复。
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAudioSessionInterruption(_:)),
+            name: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance()
+        )
+    }
+
+    @objc private func handleAudioSessionInterruption(_ notification: Notification) {
+        guard let info = notification.userInfo,
+              let raw = info[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+        switch type {
+        case .began:
+            NotificationCenter.default.post(name: .tvPlayerInterruptionBegan, object: nil)
+        case .ended:
+            // 仅当系统建议恢复（shouldResume）时才自动 resume，避免打断（如用户拒接）
+            // 后立即误恢复。
+            var shouldResume = true
+            if let optionRaw = info[AVAudioSessionInterruptionOptionKey] as? UInt {
+                let options = AVAudioSession.InterruptionOptions(rawValue: optionRaw)
+                shouldResume = options.contains(.shouldResume)
+            }
+            NotificationCenter.default.post(name: .tvPlayerInterruptionEnded, object: nil, userInfo: ["shouldResume": shouldResume])
+        @unknown default:
+            break
+        }
     }
 
     private func setupRemoteCommands() {

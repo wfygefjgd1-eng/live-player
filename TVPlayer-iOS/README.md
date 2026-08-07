@@ -1,21 +1,20 @@
-# TVPlayer iOS 2.2 正式版
+# TVPlayer iOS 2.3.8
 
 自签侧载版本的 **TVPlayer 正式版** 直播播放器。
 
 ## 版本
 
-- **Marketing Version:** 2.2
-- **Build:** 2200
+- **Marketing Version:** 2.3.8
+- **Build:** 2308
 - **显示名:** TV go
 
-## 核心变更 (v2.2)
+## 核心变更 (v2.3.8)
 
-- 播放内核从 MobileVLCKit 3.x 升级为 **libmpv（MPVKit）**，解码兼容性大幅增强：
-  - AVS2/AVS3、HEVC 10bit 50fps、DVB TS 混合流等 VLC 3.x 无法解码的源可稳定播放。
-  - Metal 渲染路径（gpu-next + Vulkan/MoltenVK），支持 10bit/HDR，画面更准确。
-- 保留多信号融合的起播检测、自动换线、自动换台与黑名单机制。
-- 后台只播音频、回前台自动恢复画面；mpv 失败时自动回退 AVPlayer（仅一次）。
-- 构建从 CocoaPods 迁移到 Swift Package Manager，CI 直接编译，无需 pod install。
+- 网速显示实时性修复：左上角网速徽标直接观察播放引擎，AVPlayer 内核改为累计字节差分计算瞬时速度，断网更快归零
+- 音频中断（来电/闹钟）后自动恢复播放
+- 修复 refreshDiagnostics 死分支，实现诊断浮层「异常时短暂提示」
+- M3U 解析加固：BOM strip、URL 校验、#EXTGRP 分组、超大源限制
+- ATS 收窄为 NSAllowsArbitraryLoadsForMedia、清理死代码与版本统一
 
 ## 功能
 
@@ -29,8 +28,8 @@
 ## 发布
 
 ```bash
-git tag v2.2-ios
-git push origin v2.2-ios
+git tag v2.3.8-ios
+git push origin v2.3.8-ios
 ```
 
 GitHub Actions 会构建 IPA 并创建 Release。

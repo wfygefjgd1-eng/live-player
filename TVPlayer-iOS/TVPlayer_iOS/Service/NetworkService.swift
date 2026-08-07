@@ -48,7 +48,6 @@ final class NetworkService {
     private let monitorQueue = DispatchQueue(label: "NetworkMonitor")
     private var isNetworkAvailable = true
     private var pendingRetry: (() -> Void)?
-    private var retryTask: Task<Void, Never>?
     private var cacheCleanupObservers: [NSObjectProtocol] = []
 
     private init() {
@@ -135,6 +134,10 @@ final class NetworkService {
               (200...299).contains(http.statusCode) else {
             throw NetworkFetchError.badResponse
         }
+        // 超大源（几十 MB）拒绝解析，避免内存占用过高；正常 M3U 都在 KB 级
+        if data.count > Self.maxBodyBytes {
+            throw NetworkFetchError.parseEmpty
+        }
         guard let text = String(data: data, encoding: .utf8), !text.isEmpty else {
             if let text2 = String(data: data, encoding: .isoLatin1), !text2.isEmpty {
                 return text2
@@ -143,6 +146,9 @@ final class NetworkService {
         }
         return text
     }
+
+    /// M3U 源最大字节数：5MB 足够容纳最大公开源（几十万行），再大视为异常拒绝
+    private static let maxBodyBytes = 5 * 1024 * 1024
 
     /// 单一源 + 镜像竞速：GitHub 系地址自动展开镜像并发请求，任一候选返回可用文本即胜出。
     /// 被墙域名常见表现是挂到超时而非快速失败，串行回退会拖慢启动，故并发。
@@ -215,38 +221,5 @@ final class NetworkService {
                 cont.resume(returning: M3UParserService.parse(body))
             }
         }
-    }
-
-    /// 带退避的重试加载（用于网络恢复后）
-    func retryLoadWithBackoff(
-        urls: [String],
-        maxRetries: Int = 3,
-        onResult: @escaping ([Channel], String?) -> Void
-    ) {
-        retryTask?.cancel()
-        retryTask = Task { [weak self] in
-            guard let self else { return }
-            var attempt = 0
-            while attempt < maxRetries, !Task.isCancelled {
-                let (channels, _) = await self.fetchWithCandidates(urls: urls)
-                if !channels.isEmpty {
-                    await MainActor.run { onResult(channels, nil) }
-                    return
-                }
-                attempt += 1
-                if attempt < maxRetries {
-                    let delay = UInt64(pow(2.0, Double(attempt)) * 1_000_000_000)
-                    try? await Task.sleep(nanoseconds: delay)
-                }
-            }
-            await MainActor.run {
-                onResult([], "加载失败，请检查网络")
-            }
-        }
-    }
-
-    func cancelRetry() {
-        retryTask?.cancel()
-        retryTask = nil
     }
 }

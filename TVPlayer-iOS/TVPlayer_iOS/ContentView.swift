@@ -97,8 +97,9 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .tvPlayerInterruptionBegan)) { _ in
             vm.noteInterruptionBegan()
         }
-        .onReceive(NotificationCenter.default.publisher(for: .tvPlayerInterruptionEnded)) { _ in
-            vm.noteInterruptionEnded(shouldResume: true)
+        .onReceive(NotificationCenter.default.publisher(for: .tvPlayerInterruptionEnded)) { note in
+            let shouldResume = (note.userInfo?["shouldResume"] as? Bool) ?? true
+            vm.noteInterruptionEnded(shouldResume: shouldResume)
         }
         .onDisappear {
             singleTapTask?.cancel()
@@ -158,11 +159,12 @@ struct ContentView: View {
                 .allowsHitTesting(false)
 
                 // 左上角常驻实时网速 + 切台反馈
+                // 注意：必须让徽章直接 @ObservedObject 观察 PlayerEngine，
+                // 否则它只会在 vm 的 @Published 变化（OSD/切台等）时被偶然重绘，
+                // 无法在每个 0.5s 采样点及时刷新 —— 这就是旧版网速"不实时"的根源。
                 VStack {
                     HStack {
-                        if !vm.player.isSwitching && vm.player.observedSpeedKBps > 0 {
-                            NetworkSpeedBadge(speedKBps: vm.player.observedSpeedKBps)
-                        }
+                        NetworkSpeedBadge(player: vm.player)
                         Spacer(minLength: 0)
                     }
                     .padding(.top, top + 4)
@@ -171,26 +173,8 @@ struct ContentView: View {
                 }
                 .allowsHitTesting(false)
 
-                // 切台中：屏幕中央转圈 + 实时网速
-                if vm.player.isSwitching {
-                    VStack(spacing: 10) {
-                        ProgressView()
-                            .controlSize(.large)
-                            .tint(.white)
-                        Text(speedText(vm.player.observedSpeedKBps))
-                            .font(.system(size: 22, weight: .bold, design: .monospaced))
-                            .monospacedDigit()
-                            .foregroundColor(.white)
-                        Text("切换中")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(.white.opacity(0.7))
-                    }
-                    .padding(.horizontal, 28)
-                    .padding(.vertical, 20)
-                    .background(Color.black.opacity(0.65))
-                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                    .allowsHitTesting(false)
-                }
+                // 切台中：屏幕中央转圈 + 实时网速（同样直接观察 player）
+                SwitchingOverlay(player: vm.player)
 
                 if vm.showDiagnosticsOverlay || vm.player.shouldShowDiagnostics {
                     VStack {
@@ -238,10 +222,37 @@ struct ContentView: View {
         (root as? FullScreenRootController)?.refreshSystemChrome()
     }
 
-    private func speedText(_ speedKBps: Double) -> String {
+    private static func speedText(_ speedKBps: Double) -> String {
         if speedKBps >= 1024 { return String(format: "%.1f MB/s", speedKBps / 1024) }
         if speedKBps > 0 { return String(format: "%.0f KB/s", speedKBps) }
         return "--"
+    }
+
+    /// 切台中转圈 + 实时网速：直接 @ObservedObject 观察 player，采样点即时刷新
+    private struct SwitchingOverlay: View {
+        @ObservedObject var player: PlayerEngine
+
+        var body: some View {
+            if player.isSwitching {
+                VStack(spacing: 10) {
+                    ProgressView()
+                        .controlSize(.large)
+                        .tint(.white)
+                    Text(speedText(player.observedSpeedKBps))
+                        .font(.system(size: 22, weight: .bold, design: .monospaced))
+                        .monospacedDigit()
+                        .foregroundColor(.white)
+                    Text("切换中")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.white.opacity(0.7))
+                }
+                .padding(.horizontal, 28)
+                .padding(.vertical, 20)
+                .background(Color.black.opacity(0.65))
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .allowsHitTesting(false)
+            }
+        }
     }
 
     private func longPressGesture() -> some Gesture {
@@ -379,23 +390,30 @@ struct ContentView: View {
 }
 
 private struct NetworkSpeedBadge: View {
-    let speedKBps: Double
+    @ObservedObject var player: PlayerEngine
 
     var body: some View {
-        Text(text)
-            .font(.system(size: 12, weight: .semibold, design: .monospaced))
-            .monospacedDigit()
-            .foregroundColor(.white)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(Color.black.opacity(0.55))
-            .clipShape(Capsule())
-            .overlay(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 0.5))
+        // 切台/无有效速度时隐藏，避免闪烁显示 "--"；正常播放才常驻
+        if !player.isSwitching && player.observedSpeedKBps > 0 {
+            Text(text)
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .monospacedDigit()
+                .foregroundColor(.white)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color.black.opacity(0.55))
+                .clipShape(Capsule())
+                .overlay(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 0.5))
+        }
     }
 
     private var text: String {
-        if speedKBps >= 1024 { return String(format: "%.1f MB/s", speedKBps / 1024) }
-        if speedKBps > 0 { return String(format: "%.0f KB/s", speedKBps) }
+        if player.observedSpeedKBps >= 1024 {
+            return String(format: "%.1f MB/s", player.observedSpeedKBps / 1024)
+        }
+        if player.observedSpeedKBps > 0 {
+            return String(format: "%.0f KB/s", player.observedSpeedKBps)
+        }
         return "--"
     }
 }

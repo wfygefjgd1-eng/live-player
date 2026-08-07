@@ -53,7 +53,6 @@ final class MPVPlaybackEngine {
     private let snapshotLock = NSLock()
     private var samplerCancelled = true
     private var lastSnapshot = DiagnosticsSample()
-    private var cachedAudioTrackCount = 0
 
     // mpv 日志环形缓冲：Release 构建也能在诊断文本里看到关键错误（硬解失败/网络失败等）
     private var logTail: [String] = []
@@ -119,7 +118,6 @@ final class MPVPlaybackEngine {
         reportedPlaying = false
         samplerCancelled = true
         lastSnapshot = DiagnosticsSample()
-        cachedAudioTrackCount = 0
         activeURL = url
 
         logTailLock.lock()
@@ -164,7 +162,6 @@ final class MPVPlaybackEngine {
         samplerCancelled = true
         command("stop", args: [])
         activeURL = nil
-        cachedAudioTrackCount = 0
         lastSnapshot = DiagnosticsSample()
     }
 
@@ -175,10 +172,6 @@ final class MPVPlaybackEngine {
     var volume: Float {
         get { Float(getInt64Property("volume")) / 100 }
         set { setVolumeProperty(newValue) }
-    }
-
-    var hasAudioTrack: Bool {
-        cachedAudioTrackCount > 0
     }
 
     /// 主线程调用：只读后台采样的快照，绝不触碰 mpv。
@@ -349,8 +342,6 @@ final class MPVPlaybackEngine {
         else { stateText = "播放中" }
         let waitingReason = pausedForCache ? "mpv 正在缓冲/等待数据" : "无"
 
-        cachedAudioTrackCount = audioTrackCount()
-
         let snapshot = DiagnosticsSample(
             observedBitrate: Double(demuxBitrate),
             averageVideoBitrate: Double(videoBitrate),
@@ -378,35 +369,6 @@ final class MPVPlaybackEngine {
         if hasVideo && !coreIdle && !pausedForCache && !paused && !reportedPlaying {
             reportPlayingIfNeeded()
         }
-    }
-
-    private func audioTrackCount() -> Int {
-        guard let ctx = mpv else { return 0 }
-        var node = mpv_node()
-        let rc = mpv_get_property(ctx, "track-list", MPV_FORMAT_NODE, &node)
-        guard rc >= 0, node.format == MPV_FORMAT_NODE_ARRAY, let list = node.u.list else {
-            if rc >= 0 { mpv_free_node_contents(&node) }
-            return 0
-        }
-        defer { mpv_free_node_contents(&node) }
-
-        var count = 0
-        for i in 0..<Int(list.pointee.num) {
-            let item = list.pointee.values[i]
-            guard item.format == MPV_FORMAT_NODE_MAP, let map = item.u.list else { continue }
-            var isAudio = false
-            for j in 0..<Int(map.pointee.num) {
-                guard let key = map.pointee.keys[j] else { continue }
-                let keyName = String(cString: key)
-                if keyName == "type",
-                   let value = map.pointee.values[j].u.string,
-                   String(cString: value) == "audio" {
-                    isAudio = true
-                }
-            }
-            if isAudio { count += 1 }
-        }
-        return count
     }
 
     // MARK: - mpv 属性/命令辅助

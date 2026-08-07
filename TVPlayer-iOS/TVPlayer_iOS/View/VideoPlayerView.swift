@@ -223,11 +223,6 @@ final class WindowVideoSurface {
         }
     }
 
-    func forceFullBleed(reason: String = "") { rebindPlayer() }
-    func hardRemount(reason: String = "") { rebindPlayer() }
-    func install(reason: String = "") {
-        if let container { install(in: container) }
-    }
     func refreshLayout() {
         if let container {
             layoutSurface(in: container)
@@ -395,18 +390,6 @@ final class NowPlayingController {
         info[MPMediaItemPropertyArtist] = artist
         info[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? 1.0 : 0.0
         info[MPNowPlayingInfoPropertyIsLiveStream] = true
-        infoCenter.nowPlayingInfo = info
-    }
-
-    func updateElapsedTime(_ time: TimeInterval) {
-        var info = infoCenter.nowPlayingInfo ?? [:]
-        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = time
-        infoCenter.nowPlayingInfo = info
-    }
-
-    func updatePlaybackRate(_ rate: Float) {
-        var info = infoCenter.nowPlayingInfo ?? [:]
-        info[MPNowPlayingInfoPropertyPlaybackRate] = rate
         infoCenter.nowPlayingInfo = info
     }
 

@@ -14,8 +14,8 @@ settings:
   base:
     DEVELOPMENT_TEAM: ""
     SWIFT_VERSION: "5.9"
-    MARKETING_VERSION: "2.3.7"
-    CURRENT_PROJECT_VERSION: "2307"
+    MARKETING_VERSION: "2.3.8"
+    CURRENT_PROJECT_VERSION: "2308"
     ENABLE_USER_SCRIPT_SANDBOXING: "NO"
 
 targets:
@@ -48,9 +48,13 @@ targets:
         UIRequiresFullScreen: true
         UILaunchStoryboardName: LaunchScreen
         UIApplicationSupportsIndirectInputEvents: true
+        UIInterfaceStyle: Dark
         NSLocalNetworkUsageDescription: "用于加载直播源与频道列表"
         NSAppTransportSecurity:
-          NSAllowsArbitraryLoads: true
+          # 仅对媒体加载放行 HTTP（iOS 10+ 媒体豁免，专为播放器设计）。
+          # 相比 NSAllowsArbitraryLoads=true 的全局豁免，非媒体请求仍受 ATS 保护，
+          # App Store 审核更友好。若个别 http 域名仍被拒可加 NSExceptionDomains 白名单。
+          NSAllowsArbitraryLoadsForMedia: true
         UIBackgroundModes:
           - audio
     settings:

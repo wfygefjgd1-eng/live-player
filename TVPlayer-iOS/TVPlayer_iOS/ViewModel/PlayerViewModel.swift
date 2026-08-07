@@ -25,8 +25,6 @@ private let AUTO_RECOVER_MAX_CHANNELS = 15
 private let BLACKLIST_REFRESH_NS: UInt64 = 60_000_000_000
 
 // 精选列表 JSON（Bundle 快速启动 / 旁路刷新），勿当 m3u 源重复塞进 PRESET
-let VALIDATED_CHANNELS_MIRROR =
-    "https://wfygefjgd.github.io/live-player/iptv-mirrors/validated-channels.json"
 let VALIDATED_M3U_MIRROR =
     "https://wfygefjgd.github.io/live-player/iptv-mirrors/validated-channels.m3u"
 let VALIDATED_M3U_CDN_MIRROR =
@@ -132,7 +130,6 @@ final class PlayerViewModel: ObservableObject {
         player.onReady = { [weak self] in self?.onPlayerReady() }
         player.onError = { [weak self] in self?.onPlayerError() }
         player.onStartupTimeout = { [weak self] in self?.onStartupTimeout() }
-        player.onSilentAudio = { [weak self] in self?.onSilentAudio() }
         player.onLowSpeed = { [weak self] reason in self?.onLowSpeed(reason) }
 
         NetworkMonitor.shared.onSatisfied = { [weak self] in self?.onNetworkBecameAvailable() }
@@ -177,25 +174,6 @@ final class PlayerViewModel: ObservableObject {
             }
         }
         return false
-    }
-
-    // 🆕 只加载频道数据，不启动播放器（用于验证界面）
-    func loadChannelsOnly() {
-        guard !started else { return }
-        started = true
-        favorites = storage.loadFavorites()
-
-        restoreLineTimeoutEnabled()
-        restoreAutoAdvanceOnExhaustion()
-        restoreSources()
-
-        // 只加载频道，不启动播放器
-        let cached = applyRules(storage.loadChannels())
-        if !cached.isEmpty {
-            channels = cached
-        } else {
-            loadChannels(force: true, silent: true, preferActiveOnly: true)
-        }
     }
 
     // MARK: - 加载逻辑
@@ -540,31 +518,6 @@ final class PlayerViewModel: ObservableObject {
         }
     }
 
-    // MARK: - 应用频道验证结果
-    func applyValidationResult(_ result: ValidationResult) {
-        var filteredChannels: [Channel] = []
-
-        for channel in rawChannels {
-            if let validURLs = result.validChannels[channel.name], !validURLs.isEmpty {
-                // 只保留验证通过的URL
-                let filtered = Channel(
-                    name: channel.name,
-                    group: channel.group,
-                    key: channel.key,
-                    urls: validURLs
-                )
-                filteredChannels.append(filtered)
-            }
-        }
-
-        channels = filteredChannels
-
-        if !channels.isEmpty {
-            currentIndex = 0
-            currentSourceIndex = 0
-        }
-    }
-
     // MARK: - 手动触发重新验证
     // MARK: - 从 Bundle 加载预验证频道
     private func loadChannelsFromBundle() -> [Channel]? {
@@ -577,66 +530,6 @@ final class PlayerViewModel: ObservableObject {
         return json.channels.map { ch in
             Channel(name: ch.name, group: ch.group, key: ch.name, urls: ch.urls)
         }
-    }
-
-    // MARK: - 从远程刷新「已筛选」频道列表（GitHub Pages 镜像）
-    /// - Returns: 是否成功应用列表
-    @discardableResult
-    func refreshChannelsFromRemote(silent: Bool = false) async -> Bool {
-        // Pages 原址 + jsDelivr/ghproxy/raw 镜像并发竞速（被墙域名会挂到超时，串行太慢）
-        let candidates = MirrorResolver.candidates(for: VALIDATED_CHANNELS_MIRROR)
-
-        let fetched: [Channel]? = await withTaskGroup(of: [Channel]?.self) { group in
-            for mirror in candidates {
-                group.addTask {
-                    guard let url = URL(string: mirror) else { return nil }
-                    let req = URLRequest(
-                        url: url,
-                        cachePolicy: .reloadIgnoringLocalCacheData,
-                        timeoutInterval: 12
-                    )
-                    guard let (data, resp) = try? await URLSession.shared.data(for: req) else { return nil }
-                    if let http = resp as? HTTPURLResponse, http.statusCode >= 400 { return nil }
-                    guard let json = try? JSONDecoder().decode(ValidatedChannelsResponse.self, from: data) else {
-                        return nil
-                    }
-                    let channels = json.channels.map { ch in
-                        Channel(name: ch.name, group: ch.group, key: ch.name, urls: ch.urls)
-                    }
-                    return channels.isEmpty ? nil : channels
-                }
-            }
-            for await result in group {
-                if let result {
-                    group.cancelAll()
-                    return result
-                }
-            }
-            return nil
-        }
-
-        guard let newChannels = fetched else {
-            if !silent { showIndicator("镜像列表暂不可用") }
-            return false
-        }
-
-        let prevKey = currentChannel?.key
-        rawChannels = newChannels
-        channels = applyRules(newChannels)
-        storage.saveChannels(newChannels)
-        isBootstrapping = false
-        if let prevKey, let idx = channels.firstIndex(where: { $0.key == prevKey }) {
-            currentIndex = idx
-        } else {
-            restoreLastChannelPosition()
-        }
-        if !silent {
-            showIndicator("已加载 \(channels.count) 个已筛频道")
-        }
-        if !playbackStable || !player.isReady {
-            playCurrent(showOSD: false, resetTried: true)
-        }
-        return true
     }
 
     func buildCandidates() -> [String] {
@@ -1056,13 +949,6 @@ final class PlayerViewModel: ObservableObject {
         autoSwitchLine(hint: reason, reason: .noData)
     }
 
-    // MARK: - 静音检测
-
-    private func onSilentAudio() {
-        // 默认关闭无声自动换线（引擎侧已不 schedule）；保留接口防回调
-        return
-    }
-
     /// 自动换线必要条件（仅下列确认坏线才切）
     /// 1. hardFail  播放器错误
     /// 2. noData    起播无画面 / 无网 / 长时间无数据且画面不动
@@ -1235,8 +1121,6 @@ final class PlayerViewModel: ObservableObject {
         playCurrent(showOSD: true, resetTried: false)
     }
 
-    func switchNextLine(hint: String) { autoSwitchLine(hint: hint, reason: .hardFail) }
-
     // MARK: - UI 辅助
 
     func showChannelOSD() {
@@ -1299,12 +1183,12 @@ final class PlayerViewModel: ObservableObject {
 
     func noteInterruptionEnded(shouldResume: Bool) {
         guard shouldResume, wasPlayingBeforeInterruption, !userPaused else { return }
+        // 中断结束后先确保音频会话已重新激活，再恢复播放（AVPlayer 分支尤其需要）
+        try? AVAudioSession.sharedInstance().setActive(true)
         resume()
     }
 
-    private var lastBrightnessTranslation: CGFloat = 0
-
-    func handleVolumeDrag(translationHeight: CGFloat, ended: Bool) {
+    private func handleVolumeDrag(translationHeight: CGFloat, ended: Bool) {
         if ended {
             lastVolumeTranslation = 0
             return
@@ -1313,11 +1197,6 @@ final class PlayerViewModel: ObservableObject {
         lastVolumeTranslation = translationHeight
         VolumeHelper.adjust(by: Float(-deltaY) / 200)
         showIndicator("音量 \(Int(VolumeHelper.current * 100))%")
-    }
-
-    /// 亮度交给系统，手势不再改屏亮
-    func handleBrightnessDrag(translationHeight: CGFloat, ended: Bool) {
-        if ended { lastBrightnessTranslation = 0 }
     }
 
     deinit {
