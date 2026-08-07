@@ -6,14 +6,8 @@ import MediaPlayer
 // =============================================================================
 // 视频画面脱离 SwiftUI 布局
 //
-// 现象 1+4：中间小框四周黑 + 小白条顶起
-// 根因：VideoPlayerView 在 SwiftUI/Hosting 安全区内，被缩成中间卡片
-//
-// 做法：
-// - PlayerSurfaceView 钉在 FullScreenRootController.view 底层四边
-// - Hosting / ContentView 全透明，只叠手势与 OSD
-// - 视频不读 safe area，小白条只能浮在上面
-// - resizeAspect：完整画面，只允许两边比例黑边
+// 视频层由 mpv 的 CAMetalLayer 直接渲染，钉在 FullScreenRootController.view 底层。
+// Hosting / ContentView 全透明，只叠手势与 OSD。
 // =============================================================================
 
 // MARK: - 根容器：系统 safe area 不参与布局
@@ -22,101 +16,13 @@ final class SinkContainerView: UIView {
     override var safeAreaInsets: UIEdgeInsets { .zero }
 }
 
-// MARK: - AVPlayer 画面层
-
-final class PlayerSurfaceView: UIView {
-    private var boundPlayer: AVPlayer?
-    private var readyForDisplayObservation: NSKeyValueObservation?
-    private weak var lastReportedItem: AVPlayerItem?
-
-    override class var layerClass: AnyClass { AVPlayerLayer.self }
-
-    private var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        backgroundColor = .black
-        isOpaque = true
-        clipsToBounds = true
-        isUserInteractionEnabled = false
-        playerLayer.videoGravity = .resizeAspect
-        playerLayer.backgroundColor = UIColor.black.cgColor
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    func setPlayer(_ player: AVPlayer?) {
-        let playerChanged = boundPlayer !== player
-        boundPlayer = player
-        if playerLayer.player !== player {
-            playerLayer.player = player
-        }
-        if playerChanged || readyForDisplayObservation == nil {
-            observeReadyForDisplay()
-        }
-        reportReadyForDisplayIfNeeded()
-        playerLayer.isHidden = false
-        playerLayer.opacity = 1
-        playerLayer.videoGravity = .resizeAspect
-        setNeedsLayout()
-    }
-
-    private func observeReadyForDisplay() {
-        readyForDisplayObservation?.invalidate()
-        lastReportedItem = nil
-        readyForDisplayObservation = playerLayer.observe(
-            \.isReadyForDisplay,
-            options: [.initial, .new]
-        ) { [weak self] layer, _ in
-            guard layer.isReadyForDisplay else { return }
-            DispatchQueue.main.async {
-                self?.reportReadyForDisplayIfNeeded()
-            }
-        }
-    }
-
-    private func reportReadyForDisplayIfNeeded() {
-        guard playerLayer.isReadyForDisplay,
-              let player = boundPlayer,
-              let item = player.currentItem,
-              lastReportedItem !== item else { return }
-        lastReportedItem = item
-        NotificationCenter.default.post(
-            name: Notification.Name("tvPlayerVideoRendered"),
-            object: player
-        )
-    }
-
-    func rebind() {
-        guard let p = boundPlayer else { return }
-        if playerLayer.player !== p { playerLayer.player = p }
-        playerLayer.videoGravity = .resizeAspect
-        setNeedsLayout()
-        layoutIfNeeded()
-    }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        playerLayer.videoGravity = .resizeAspect
-    }
-}
-
 // MARK: - 全局画面宿主（钉在 root 底层，不进 SwiftUI）
 
 final class WindowVideoSurface {
     static let shared = WindowVideoSurface()
 
-    private enum Backend {
-        case avPlayer
-        case mpv
-    }
-
-    private(set) var surface: PlayerSurfaceView?
     private(set) var mpvSurface: UIView?
     private weak var container: UIView?
-    private var boundPlayer: AVPlayer?
-    private var systemPlayerController: AVPlayerViewController?
-    private var activeBackend: Backend = .avPlayer
 
     private init() {}
 
@@ -134,53 +40,12 @@ final class WindowVideoSurface {
             width: size.width,
             height: size.height
         )
-        surface?.frame = frame
         mpvSurface?.frame = frame
-        systemPlayerController?.view.frame = frame
-    }
-
-    private func applyBackendVisibility() {
-        let showMPV = activeBackend == .mpv
-        // The system controller is the only active AV renderer. Keeping the
-        // old AVPlayerLayer detached prevents duplicate rendering and freezes.
-        surface?.isHidden = true
-        mpvSurface?.isHidden = !showMPV
-        surface?.alpha = 0
-        mpvSurface?.alpha = showMPV ? 1 : 0
-        systemPlayerController?.view.isHidden = showMPV
-        systemPlayerController?.view.alpha = showMPV ? 0 : 1
     }
 
     /// 安装到 root 容器底层，直接按物理横屏尺寸铺开，避免被上层布局压成中间小框
     func install(in container: UIView) {
         self.container = container
-        let surface: PlayerSurfaceView
-        if let existing = self.surface {
-            surface = existing
-        } else {
-            surface = PlayerSurfaceView(frame: container.bounds)
-            self.surface = surface
-        }
-
-        if systemPlayerController == nil {
-            let controller = AVPlayerViewController()
-            controller.showsPlaybackControls = false
-            controller.videoGravity = .resizeAspect
-            controller.allowsPictureInPicturePlayback = false
-            controller.entersFullScreenWhenPlaybackBegins = false
-            controller.exitsFullScreenWhenPlaybackEnds = false
-            controller.view.backgroundColor = .black
-            controller.view.isOpaque = true
-            controller.view.isUserInteractionEnabled = false
-            systemPlayerController = controller
-        }
-        if let controllerView = systemPlayerController?.view,
-           controllerView.superview !== container {
-            controllerView.removeFromSuperview()
-            controllerView.translatesAutoresizingMaskIntoConstraints = true
-            controllerView.autoresizingMask = []
-            container.insertSubview(controllerView, at: 0)
-        }
 
         let mpvSurface: UIView
         if let existing = self.mpvSurface {
@@ -195,77 +60,33 @@ final class WindowVideoSurface {
             mpvSurface.translatesAutoresizingMaskIntoConstraints = true
             mpvSurface.autoresizingMask = []
             container.insertSubview(mpvSurface, at: 0)
-        }
-
-        if surface.superview !== container {
-            surface.removeFromSuperview()
-            surface.translatesAutoresizingMaskIntoConstraints = true
-            surface.autoresizingMask = []
-            container.insertSubview(surface, at: 0)
         } else {
-            container.sendSubviewToBack(surface)
+            container.sendSubviewToBack(mpvSurface)
         }
 
         layoutSurface(in: container)
-        applyBackendVisibility()
-
-        if let p = boundPlayer {
-            systemPlayerController?.player = p
-            surface.setPlayer(nil)
-        }
-    }
-
-    func setPlayer(_ player: AVPlayer?) {
-        boundPlayer = player
-        if let controller = systemPlayerController {
-            controller.player = player
-            surface?.setPlayer(nil)
-        } else if let surface {
-            surface.setPlayer(nil)
-        } else if let container {
-            install(in: container)
-            systemPlayerController?.player = player
-        }
     }
 
     /// Activates mpv's CAMetalLayer drawable without disturbing SwiftUI.
     @discardableResult
     func showMPV() -> UIView? {
-        activeBackend = .mpv
         if mpvSurface == nil, let container {
             install(in: container)
         }
-        applyBackendVisibility()
+        mpvSurface?.isHidden = false
         rebindPlayer()
         return mpvSurface
     }
 
-    func showAVPlayer(_ player: AVPlayer?) {
-        activeBackend = .avPlayer
-        setPlayer(player)
-        applyBackendVisibility()
-        rebindPlayer()
-    }
-
     func rebindPlayer() {
-        if let container, surface?.superview !== container {
+        if let container, mpvSurface?.superview !== container {
             install(in: container)
         }
         if let container {
             layoutSurface(in: container)
         }
-        if boundPlayer != nil {
-            if systemPlayerController?.view.superview == nil, let container {
-                install(in: container)
-            }
-            systemPlayerController?.player = boundPlayer
-        }
-        applyBackendVisibility()
-        // 两个解码画面都保持在 SwiftUI 叠层下方；当前后端由 hidden/alpha 控制。
-        if let container {
-            if let mpvSurface { container.sendSubviewToBack(mpvSurface) }
-            if let systemView = systemPlayerController?.view { container.sendSubviewToBack(systemView) }
-            if let surface { container.sendSubviewToBack(surface) }
+        if let mpvSurface, let container {
+            container.sendSubviewToBack(mpvSurface)
         }
     }
 
@@ -281,7 +102,7 @@ final class WindowVideoSurface {
     }
 }
 
-// MARK: - SwiftUI：仅绑定 player，不承载画面尺寸
+// MARK: - SwiftUI：空占位（画面在 root 底层，不由此承载）
 
 struct VideoPlayerView: UIViewRepresentable {
     @EnvironmentObject private var vm: PlayerViewModel
@@ -290,12 +111,10 @@ struct VideoPlayerView: UIViewRepresentable {
         let v = UIView()
         v.backgroundColor = .clear
         v.isUserInteractionEnabled = false
-        WindowVideoSurface.shared.setPlayer(vm.player.player)
         return v
     }
 
     func updateUIView(_ uiView: UIView, context: Context) {
-        WindowVideoSurface.shared.setPlayer(vm.player.player)
         _ = vm.playerLayoutEpoch
     }
 }
@@ -354,18 +173,11 @@ final class FullScreenRootController: UIViewController {
             hosted.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
         ])
         hosted.didMove(toParent: self)
-
-        if let surface = WindowVideoSurface.shared.surface {
-            view.sendSubviewToBack(surface)
-        }
     }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         WindowVideoSurface.shared.refreshLayout()
-        if let surface = WindowVideoSurface.shared.surface {
-            view.sendSubviewToBack(surface)
-        }
     }
 
     override func viewDidAppear(_ animated: Bool) {

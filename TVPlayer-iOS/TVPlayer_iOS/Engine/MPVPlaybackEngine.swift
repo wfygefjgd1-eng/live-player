@@ -101,6 +101,8 @@ final class MPVPlaybackEngine {
         }
 
         setVolumeProperty(volume)
+        // 确保视频输出开启：后台会设 vid=no，若残留会导致加载新文件后有声音无画面
+        setStringProperty("vid", "auto")
         stoppedByOwner = false
         command("loadfile", args: [url.absoluteString, "replace"])
         onStateChanged?("正在打开")
@@ -180,9 +182,6 @@ final class MPVPlaybackEngine {
             "reconnect=1:reconnect_streamed=1:reconnect_on_network_error=1"))
         checkError(mpv_set_option_string(ctx, "user-agent",
             "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15"))
-
-        // 广播源 25/50fps 到 60Hz 屏的平滑播放；不叠加插帧
-        checkError(mpv_set_option_string(ctx, "video-sync", "display-resample"))
 
         // 电视场景不需要字幕/OSD
         checkError(mpv_set_option_string(ctx, "sid", "no"))
@@ -415,6 +414,14 @@ final class MPVPlaybackEngine {
         guard let ctx = mpv else { return }
         var v = value
         mpv_set_property(ctx, name, MPV_FORMAT_INT64, &v)
+    }
+
+    private func setStringProperty(_ name: String, _ value: String) {
+        guard let ctx = mpv else { return }
+        let rc = mpv_set_property_string(ctx, name, value)
+        if rc < 0 {
+            print("[mpv] set property '\(name)'='\(value)' error: \(String(cString: mpv_error_string(rc)))")
+        }
     }
 
     private func checkError(_ status: Int32) {

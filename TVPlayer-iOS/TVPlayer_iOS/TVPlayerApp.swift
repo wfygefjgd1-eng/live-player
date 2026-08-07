@@ -74,7 +74,6 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         self.window = window
         window.makeKeyAndVisible()
         requestLandscape(for: scene, root: container)
-        WindowVideoSurface.shared.setPlayer(viewModel.player.player)
         WindowVideoSurface.shared.rebindPlayer()
         container.refreshSystemChrome()
     }

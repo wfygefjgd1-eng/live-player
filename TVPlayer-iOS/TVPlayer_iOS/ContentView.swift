@@ -14,11 +14,11 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
-            // 透明：露出 root 底层 PlayerSurfaceView
+            // 透明：露出 root 底层 mpv 画面
             Color.clear
                 .ignoresSafeArea()
 
-            // 仅绑定 AVPlayer，不参与画面尺寸
+            // 透明占位：画面在 UIKit root 底层（mpv 直接渲染到 Metal 图层）
             VideoPlayerView()
                 .frame(width: 0, height: 0)
                 .opacity(0)
@@ -62,7 +62,6 @@ struct ContentView: View {
         .defersSystemGestures(on: .all)
         .onAppear {
             vm.startup()
-            WindowVideoSurface.shared.setPlayer(vm.player.player)
             WindowVideoSurface.shared.rebindPlayer()
             refreshImmersiveChrome()
             WindowPanelSurface.shared.setPanel(

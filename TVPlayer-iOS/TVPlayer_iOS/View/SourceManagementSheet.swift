@@ -158,7 +158,7 @@ struct SourceManagementSheet: View {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("TV go 2.2")
                                 .font(.headline)
-                            Text("• 播放内核为 libmpv（MPVKit），AVPlayer 仅在 mpv 起播失败时自动兜底")
+                            Text("• 播放内核为 libmpv（MPVKit），不再内置 AVPlayer 兜底")
                             Text("• Metal 渲染路径（gpu-next + Vulkan/MoltenVK），支持 10bit/HDR 与 VideoToolbox 硬解")
                             Text("• 兼容 AVS2/AVS3、HEVC 10bit 50fps、非标 HLS 等 AVPlayer 难以播放的格式")
                             Text("• 仅在缓冲、低帧率、持续丢帧或音画不同步时显示实时诊断")
