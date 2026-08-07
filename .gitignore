@@ -3,6 +3,8 @@ __pycache__/
 *.pyo
 build/
 dist/
+# iOS 本地构建产物
+build-artifacts/
 # PyInstaller spec files only
 /TVPlayer.spec
 /TVPlayer_TK.spec

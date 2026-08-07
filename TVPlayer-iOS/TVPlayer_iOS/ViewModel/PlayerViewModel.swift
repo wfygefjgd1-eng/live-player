@@ -1188,7 +1188,7 @@ final class PlayerViewModel: ObservableObject {
         resume()
     }
 
-    private func handleVolumeDrag(translationHeight: CGFloat, ended: Bool) {
+    func handleVolumeDrag(translationHeight: CGFloat, ended: Bool) {
         if ended {
             lastVolumeTranslation = 0
             return
