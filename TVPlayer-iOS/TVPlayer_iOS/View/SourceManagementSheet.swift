@@ -159,7 +159,7 @@ struct SourceManagementSheet: View {
                             Text("TV go 2.3")
                                 .font(.headline)
                             Text("• 播放内核为系统 AVPlayer（iPhone 原生最稳定、零体积），绝大多数来源直接播放")
-                            Text("• live.264788.xyz 等特殊长分片/隔行源自动使用 libmpv（MPVKit）兼容内核")
+                            Text("• live.264788.xyz 等特殊长分片/隔行源自动使用 libmpv（软件解码 + 去隔行）")
                             Text("• 兼容 AVS2/AVS3、HEVC 10bit 50fps、非标 HLS 等 AVPlayer 难以播放的格式")
                             Text("• 仅在缓冲、低帧率、持续丢帧或音画不同步时显示实时诊断")
                             Text("• 每次进入 App 都重新加载当前选中的来源")

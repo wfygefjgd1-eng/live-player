@@ -28,6 +28,12 @@ final class MPVPlaybackEngine {
         var stateText: String = "未开始"
         var waitingReason: String = "无"
         var hasVideoOutput = false
+        /// 当前缓存读取速度（KB/s），区分「网络无数据」与「解码不输出」
+        var cacheSpeedKBps: Double = 0
+        /// hwdec-active：硬解是否实际生效（隔行源若硬解不输出，应改软解）
+        var hwdecActive = false
+        /// playback-abort：mpv 是否已因致命错误中止（被错误日志吞掉时也能看出来）
+        var playbackAborted = false
     }
 
     var onPlaying: (() -> Void)?
@@ -48,6 +54,27 @@ final class MPVPlaybackEngine {
     private var samplerCancelled = true
     private var lastSnapshot = DiagnosticsSample()
     private var cachedAudioTrackCount = 0
+
+    // mpv 日志环形缓冲：Release 构建也能在诊断文本里看到关键错误（硬解失败/网络失败等）
+    private var logTail: [String] = []
+    private let logTailLock = NSLock()
+
+    /// 最近 30 条 mpv 日志（诊断用，复制到播放诊断里）
+    var logTailText: String {
+        logTailLock.lock()
+        let lines = Array(logTail.suffix(30))
+        logTailLock.unlock()
+        return lines.joined()
+    }
+
+    private func captureLog(_ text: String) {
+        logTailLock.lock()
+        logTail.append(text)
+        if logTail.count > 200 {
+            logTail.removeFirst(logTail.count - 200)
+        }
+        logTailLock.unlock()
+    }
 
     private var backgroundObserver: NSObjectProtocol?
     private var foregroundObserver: NSObjectProtocol?
@@ -85,7 +112,7 @@ final class MPVPlaybackEngine {
 
     // MARK: - Public API（与旧 VLCPlaybackEngine 保持同一形状）
 
-    func play(url: URL, drawable: UIView, volume: Float) {
+    func play(url: URL, drawable: UIView, volume: Float, softwareDecode: Bool) {
         stoppedByOwner = true
         command("stop", args: [])
 
@@ -95,12 +122,21 @@ final class MPVPlaybackEngine {
         cachedAudioTrackCount = 0
         activeURL = url
 
+        logTailLock.lock()
+        logTail.removeAll()
+        logTailLock.unlock()
+        captureLog("[app] loadfile \(url.absoluteString) softwareDecode=\(softwareDecode)\n")
+
         guard let host = drawable as? MPVMetalHostView,
               ensureMpvInitialized(layer: host.metalLayer) else {
             onError?("mpv 初始化失败")
             return
         }
 
+        // 隔行 1080i 源：VideoToolbox 硬解可能永不输出第一帧（与 AVPlayer 幻灯片同根因），
+        // 必须用软件解码 + 去隔行（与桌面 FFmpeg/VLC 成功路径一致）。
+        setStringProperty("hwdec", softwareDecode ? "no" : "videotoolbox")
+        setFlagProperty("deinterlace", softwareDecode)
         setVolumeProperty(volume)
         // 确保视频输出开启：后台会设 vid=no，若残留会导致加载新文件后有声音无画面
         setStringProperty("vid", "auto")
@@ -172,13 +208,16 @@ final class MPVPlaybackEngine {
         checkError(mpv_set_option_string(ctx, "vo", "gpu-next"))
         checkError(mpv_set_option_string(ctx, "gpu-api", "vulkan"))
         checkError(mpv_set_option_string(ctx, "gpu-context", "moltenvk"))
+        // 默认硬解；隔行源（live.264788.xyz）在 play() 里按需切软解
         checkError(mpv_set_option_string(ctx, "hwdec", "videotoolbox"))
+        checkError(mpv_set_option_string(ctx, "deinterlace", "no"))
         var layerPtr = Int64(bitPattern: UInt64(UInt(bitPattern: Unmanaged.passUnretained(layer).toOpaque())))
         checkError(mpv_set_option(ctx, "wid", MPV_FORMAT_INT64, &layerPtr))
 
-        // 直播稳定：网络重连 + 播放缓存
+        // 直播稳定：网络重连 + 播放缓存；network-timeout 兜底防静默无限重连
         checkError(mpv_set_option_string(ctx, "cache", "yes"))
         checkError(mpv_set_option_string(ctx, "cache-secs", "10"))
+        checkError(mpv_set_option_string(ctx, "network-timeout", "20"))
         checkError(mpv_set_option_string(ctx, "stream-lavf-o",
             "reconnect=1:reconnect_streamed=1:reconnect_on_network_error=1"))
         checkError(mpv_set_option_string(ctx, "user-agent",
@@ -232,17 +271,19 @@ final class MPVPlaybackEngine {
             let end = UnsafePointer<mpv_event_end_file>(OpaquePointer(event.pointee.data))
             if end?.pointee.reason == MPV_END_FILE_REASON_ERROR {
                 guard !stoppedByOwner else { return }
+                captureLog("[app] mpv 播放中止：解码或媒体错误\n")
                 notifyError("mpv 播放器报告解码或媒体错误")
             }
         case MPV_EVENT_SHUTDOWN:
             mpv = nil
         case MPV_EVENT_LOG_MESSAGE:
-            #if DEBUG
             if let msg = UnsafePointer<mpv_event_log_message>(OpaquePointer(event.pointee.data)) {
                 let text = msg.pointee.text.flatMap { String(cString: $0) } ?? ""
+                captureLog(text)
+                #if DEBUG
                 print("[mpv] \(text)", terminator: "")
+                #endif
             }
-            #endif
         default:
             break
         }
@@ -296,6 +337,8 @@ final class MPVPlaybackEngine {
         let coreIdle = getFlagProperty("core-idle")
         let pausedForCache = getFlagProperty("paused-for-cache")
         let paused = getFlagProperty("pause")
+        let hwdecActive = getFlagProperty("hwdec-active")
+        let playbackAborted = getFlagProperty("playback-abort")
 
         let hasVideo = width > 0 && height > 0
         let stateText: String
@@ -318,7 +361,10 @@ final class MPVPlaybackEngine {
             playbackClockSeconds: timePos,
             stateText: stateText,
             waitingReason: waitingReason,
-            hasVideoOutput: hasVideo && !coreIdle && !pausedForCache
+            hasVideoOutput: hasVideo && !coreIdle && !pausedForCache,
+            cacheSpeedKBps: Double(cacheSpeed) / 1024,
+            hwdecActive: hwdecActive,
+            playbackAborted: playbackAborted
         )
 
         snapshotLock.lock()

@@ -112,7 +112,12 @@ final class PlayerEngine: ObservableObject {
         let observed = diagnostics.observedBitrate > 0 ? String(format: "%.2f Mbps", diagnostics.observedBitrate / 1_000_000) : "未知"
         let averageVideo = diagnostics.averageVideoBitrate > 0
             ? String(format: "%.2f Mbps", diagnostics.averageVideoBitrate / 1_000_000) : "未知"
-        return "TV go iOS 播放诊断\n播放内核: \(activeEngineName)\n线路: \(currentURLString.isEmpty ? "未知" : currentURLString)\n分辨率: \(diagnostics.resolutionText)\n输出/源帧率: \(String(format: "%.1f", diagnostics.currentVideoFrameRate)) / \(String(format: "%.1f", diagnostics.nominalVideoFrameRate)) fps\n累计丢帧: \(diagnostics.droppedVideoFrames)（最近 \(String(format: "%.1f", diagnostics.droppedFramesPerSecond)) 帧/秒）\n实际下载码率: \(observed)\n平均视频码率: \(averageVideo)\n缓冲: \(String(format: "%.1f", diagnostics.bufferSeconds)) 秒\n卡顿: \(diagnostics.stallCount) 次\n播放状态: \(diagnostics.timeControlStatus)\n等待原因: \(diagnostics.waitingReason)\n缓冲可持续: \(diagnostics.isLikelyToKeepUp ? "是" : "否")\n诊断判断: \(diagnostics.assessment)\n最近状态: \(diagnostics.reason.isEmpty ? "未知" : diagnostics.reason)"
+        var summary = "TV go iOS 播放诊断\n播放内核: \(activeEngineName)\n线路: \(currentURLString.isEmpty ? "未知" : currentURLString)\n分辨率: \(diagnostics.resolutionText)\n输出/源帧率: \(String(format: "%.1f", diagnostics.currentVideoFrameRate)) / \(String(format: "%.1f", diagnostics.nominalVideoFrameRate)) fps\n累计丢帧: \(diagnostics.droppedVideoFrames)（最近 \(String(format: "%.1f", diagnostics.droppedFramesPerSecond)) 帧/秒）\n实际下载码率: \(observed)\n平均视频码率: \(averageVideo)\n缓冲: \(String(format: "%.1f", diagnostics.bufferSeconds)) 秒\n卡顿: \(diagnostics.stallCount) 次\n播放状态: \(diagnostics.timeControlStatus)\n等待原因: \(diagnostics.waitingReason)\n缓冲可持续: \(diagnostics.isLikelyToKeepUp ? "是" : "否")\n解码: \(diagnostics.hwdecActive ? "硬解" : "软解/未知")  缓存速度: \(String(format: "%.0f", diagnostics.cacheSpeedKBps)) KB/s  中止标志: \(diagnostics.playbackAborted ? "是" : "否")\n诊断判断: \(diagnostics.assessment)\n最近状态: \(diagnostics.reason.isEmpty ? "未知" : diagnostics.reason)"
+        let log = mpvEngine.logTailText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !log.isEmpty {
+            summary += "\nmpv 日志（最近 30 条）:\n\(log)"
+        }
+        return summary
     }
 
     var onError: (() -> Void)?
@@ -331,7 +336,12 @@ final class PlayerEngine: ObservableObject {
             engineName: activeEngineName,
             reason: asFallback ? "AVPlayer 起播失败，已自动回退 mpv" : ""
         )
-        mpvEngine.play(url: url, drawable: drawable, volume: requestedVolume)
+        mpvEngine.play(
+            url: url,
+            drawable: drawable,
+            volume: requestedVolume,
+            softwareDecode: Self.requiresMPV(url)
+        )
         startLiveDiagnostics(token: token)
 
         guard lineTimeoutEnabled else { return }
@@ -671,7 +681,10 @@ final class PlayerEngine: ObservableObject {
                 isBufferEmpty: false,
                 playbackClockSeconds: sample.playbackClockSeconds,
                 engineName: activeEngineName,
-                reason: reason ?? diagnostics.reason
+                reason: reason ?? diagnostics.reason,
+                cacheSpeedKBps: sample.cacheSpeedKBps,
+                hwdecActive: sample.hwdecActive,
+                playbackAborted: sample.playbackAborted
             )
         }
     }
@@ -777,6 +790,12 @@ struct PlaybackDiagnostics: Equatable {
     var audioVideoSyncDiff: TimeInterval
     var engineName: String
     var reason: String
+    /// mpv 缓存读取速度（KB/s），>0 说明网络在流动、卡的是解码/渲染
+    var cacheSpeedKBps: Double
+    /// mpv 硬解是否实际生效
+    var hwdecActive: Bool
+    /// mpv playback-abort 中止标志
+    var playbackAborted: Bool
 
     var resolutionText: String {
         videoWidth > 0 && videoHeight > 0 ? "\(videoWidth)×\(videoHeight)" : "未知"
@@ -788,7 +807,13 @@ struct PlaybackDiagnostics: Equatable {
                 return "mpv 解码或媒体错误"
             }
             if timeControlStatus == "正在打开" {
-                return "mpv 正在建立直播缓冲"
+                if playbackAborted {
+                    return "mpv 已中止：致命错误"
+                }
+                if cacheSpeedKBps > 0 {
+                    return "网络在流动，卡在解码/渲染（已按隔行源启用软解）"
+                }
+                return "mpv 正在建立直播缓冲（网络暂未取得数据）"
             }
             if droppedFramesPerSecond >= 3 {
                 return "mpv 解码持续丢帧"
@@ -837,7 +862,10 @@ struct PlaybackDiagnostics: Equatable {
         playbackClockSeconds: TimeInterval = 0,
         audioVideoSyncDiff: TimeInterval = 0,
         engineName: String = "AVPlayer",
-        reason: String = ""
+        reason: String = "",
+        cacheSpeedKBps: Double = 0,
+        hwdecActive: Bool = false,
+        playbackAborted: Bool = false
     ) {
         self.observedBitrate = observedBitrate
         self.averageVideoBitrate = averageVideoBitrate
@@ -858,5 +886,8 @@ struct PlaybackDiagnostics: Equatable {
         self.audioVideoSyncDiff = audioVideoSyncDiff
         self.engineName = engineName
         self.reason = reason
+        self.cacheSpeedKBps = cacheSpeedKBps
+        self.hwdecActive = hwdecActive
+        self.playbackAborted = playbackAborted
     }
 }
