@@ -313,7 +313,7 @@ final class MPVPlaybackEngine {
     // MARK: - 后台采样
 
     private func scheduleNextSample() {
-        samplerQueue.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+        samplerQueue.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let self, !self.samplerCancelled else { return }
             self.collectSampleOnBackground()
             self.scheduleNextSample()

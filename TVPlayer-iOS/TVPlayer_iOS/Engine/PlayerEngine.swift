@@ -99,12 +99,17 @@ final class PlayerEngine: ObservableObject {
     private var consecutiveBufferSeconds: Double = 0
     private var lowSpeedReported = false
 
-    /// EMA-smoothed observed bitrate (bps) for stable UI speed display
-    private var smoothedObservedBitrate: Double = 0
-    private let smoothingAlpha: Double = 0.3
+    /// EMA-smoothed download speed (KB/s) for stable UI speed display
+    private var smoothedSpeedKBps: Double = 0
+    private let smoothingAlpha: Double = 0.25
+    /// 最近一次有效网速采样的时间：超时（3s 无新数据）即归零，避免显示过期速度
+    private var lastValidSpeedSampleAt: Date = .distantPast
+    private let speedStaleTimeout: TimeInterval = 3.0
 
     @Published var isReady = false
     @Published var isPlaying = false
+    /// 正在切台/切线路（起播中未出画）：UI 显示「正在切换」反馈
+    @Published private(set) var isSwitching = false
     /// 最近采样网速 KB/s（供 UI/调试）
     @Published var observedSpeedKBps: Double = 0
     @Published private(set) var diagnostics = PlaybackDiagnostics()
@@ -205,6 +210,9 @@ final class PlayerEngine: ObservableObject {
         playStartedAt = Date()
         isReady = false
         isPlaying = true
+        isSwitching = true
+        smoothedSpeedKBps = 0
+        lastValidSpeedSampleAt = .distantPast
 
         if Self.requiresMPV(url) {
             // 已知 AVPlayer 无法处理：直接 mpv，不再先试 AVPlayer
@@ -376,6 +384,7 @@ final class PlayerEngine: ObservableObject {
         avStartupTask = nil
         diagnostics.reason = reason
         recordFailureOnce()
+        isSwitching = false
         if isReady {
             onError?()
         } else {
@@ -391,6 +400,7 @@ final class PlayerEngine: ObservableObject {
         isPlaying = true
         guard !isReady else { return }
         isReady = true
+        isSwitching = false
         diagnostics.timeControlStatus = "播放中"
         diagnostics.waitingReason = "无"
         diagnostics.isBufferEmpty = false
@@ -498,10 +508,12 @@ final class PlayerEngine: ObservableObject {
         currentURL = nil
         isPlaying = false
         isReady = false
+        isSwitching = false
         shouldShowDiagnostics = false
         stallWatchEnabled = false
         failureRecorded = false
-        smoothedObservedBitrate = 0
+        smoothedSpeedKBps = 0
+        lastValidSpeedSampleAt = .distantPast
         observedSpeedKBps = 0
     }
 
@@ -658,24 +670,34 @@ final class PlayerEngine: ObservableObject {
         diagnosticsTask?.cancel()
         diagnosticsTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                try? await Task.sleep(nanoseconds: 500_000_000)
                 guard let self, !Task.isCancelled, self.playToken == token else { return }
                 self.refreshDiagnostics(reason: nil)
             }
         }
     }
 
+    /// 统一网速平滑入口：rawKBps>0 时更新 EMA；连续 3s 无新数据则归零
+    private func updateSpeed(rawKBps: Double) {
+        let now = Date()
+        if rawKBps > 0 {
+            smoothedSpeedKBps = smoothedSpeedKBps * (1 - smoothingAlpha) + rawKBps * smoothingAlpha
+            lastValidSpeedSampleAt = now
+        } else if now.timeIntervalSince(lastValidSpeedSampleAt) > speedStaleTimeout {
+            smoothedSpeedKBps = 0
+        }
+        observedSpeedKBps = smoothedSpeedKBps
+    }
+
     private func refreshDiagnostics(reason: String?) {
 if activeBackend == .mpv {
             let sample = mpvEngine.diagnosticsSample()
-            let rawKBps = sample.observedBitrate > 0 ? sample.observedBitrate / 8 / 1024 : 0
-            if sample.observedBitrate > 0 {
-                smoothedObservedBitrate = smoothedObservedBitrate * (1 - smoothingAlpha) + sample.observedBitrate * smoothingAlpha
-            }
-            let smoothedKBps = smoothedObservedBitrate / 8 / 1024
-            observedSpeedKBps = max(rawKBps, smoothedKBps)
+            // 实时下载速度：cache-speed = 缓存实时填充速率（KB/s），
+            // demux bitrate 是长时间滑动均值，长分片源在分片下载间歇会掉到 0。
+            let rawKBps = sample.cacheSpeedKBps
+            updateSpeed(rawKBps: rawKBps)
             diagnostics = PlaybackDiagnostics(
-                observedBitrate: smoothedObservedBitrate,
+                observedBitrate: smoothedSpeedKBps * 1024 * 8,
                 averageVideoBitrate: sample.averageVideoBitrate,
                 currentVideoFrameRate: sample.outputFrameRate,
                 nominalVideoFrameRate: sample.nominalFrameRate,
@@ -696,13 +718,13 @@ if activeBackend == .mpv {
         }
     }
 
-    // MARK: - AVPlayer 轻量采样（2s，主线程安全）
+    // MARK: - AVPlayer 轻量采样（0.5s，主线程安全）
 
     private func startAVDiagnostics(token: Int) {
         avDiagnosticsTask?.cancel()
         avDiagnosticsTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                try? await Task.sleep(nanoseconds: 500_000_000)
                 guard let self, !Task.isCancelled, self.playToken == token,
                       self.activeBackend == .avPlayer else { return }
                 self.sampleAVDiagnostics()
@@ -714,7 +736,13 @@ if activeBackend == .mpv {
         guard let item = avItem else { return }
         let log = item.accessLog()
         let event = log?.events.last
-        let observed = event?.observedBitrate ?? 0
+        // 最近分片真实下载速度 = 累计字节数 / 累计耗时（随下载过程持续更新，
+        // 比分片级均值 observedBitrate 更实时）
+        let transferDuration = event?.transferDuration ?? 0
+        let transferredBytes = Double(event?.numberOfBytesTransferred ?? 0)
+        let instantKBps = transferDuration > 0.05 ? transferredBytes / 1024 / transferDuration : 0
+        let fallbackKBps = (event?.observedBitrate ?? 0) > 0 ? (event?.observedBitrate ?? 0) / 8 / 1024 : 0
+        updateSpeed(rawKBps: instantKBps > 0 ? instantKBps : fallbackKBps)
         let bitrate = event?.indicatedBitrate ?? 0
         let size = item.presentationSize
         let ranges = item.loadedTimeRanges
@@ -727,14 +755,8 @@ if activeBackend == .mpv {
         let state = avStateText()
         let videoTrack = item.tracks.first { $0.assetTrack?.mediaType == .video }?.assetTrack
 
-        if observed > 0 {
-            smoothedObservedBitrate = smoothedObservedBitrate * (1 - smoothingAlpha) + Double(observed) * smoothingAlpha
-        }
-        let smoothedKBps = smoothedObservedBitrate / 8 / 1024
-        observedSpeedKBps = max(observed > 0 ? observed / 8 / 1024 : 0, smoothedKBps)
-        let displaySpeedKBps = max(observedSpeedKBps, smoothedObservedBitrate / 8 / 1024)
         diagnostics = PlaybackDiagnostics(
-            observedBitrate: smoothedObservedBitrate,
+            observedBitrate: smoothedSpeedKBps * 1024 * 8,
             averageVideoBitrate: Double(bitrate),
             currentVideoFrameRate: 0,
             nominalVideoFrameRate: videoTrack.map { Double($0.nominalFrameRate) } ?? 0,
