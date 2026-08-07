@@ -214,12 +214,13 @@ final class MPVPlaybackEngine {
         var layerPtr = Int64(bitPattern: UInt64(UInt(bitPattern: Unmanaged.passUnretained(layer).toOpaque())))
         checkError(mpv_set_option(ctx, "wid", MPV_FORMAT_INT64, &layerPtr))
 
-        // 直播稳定：网络重连 + 播放缓存；network-timeout 兜底防静默无限重连
+        // 直播稳定：播放缓存；network-timeout 兜底防静默无限等待。
+        // 注意：不能再用 stream-lavf-o 传 reconnect=…（该 MPVKit 桥接会把整串当
+        // reconnect 的值 → 布尔解析失败 → 每次 https 打开都立即失败，mpv 从未成功
+        // 打开过任何 https 源，根因见 v2.3.1 真机日志）。HLS 解复用自身会重试分片。
         checkError(mpv_set_option_string(ctx, "cache", "yes"))
         checkError(mpv_set_option_string(ctx, "cache-secs", "10"))
         checkError(mpv_set_option_string(ctx, "network-timeout", "20"))
-        checkError(mpv_set_option_string(ctx, "stream-lavf-o",
-            "reconnect=1:reconnect_streamed=1:reconnect_on_network_error=1"))
         checkError(mpv_set_option_string(ctx, "user-agent",
             "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15"))
 
