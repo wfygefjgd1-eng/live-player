@@ -4,7 +4,8 @@ import Metal
 import AVFAudio
 import Libmpv
 
-/// mpv / libmpv 直播内核（MPVKit 预编译库）。仅此一个内核，无 AVPlayer 兜底。
+/// mpv / libmpv 兼容内核（MPVKit 预编译库）。主内核为系统 AVPlayer，
+/// 本内核仅用于 live.264788.xyz 等特殊源与 AVPlayer 失败后的自动回退。
 ///
 /// 稳定性要点：与 VLC 内核同构——所有 mpv 统计/轨道/时间查询都在后台队列采样，
 /// 主线程只读快照，绝不触碰可能阻塞 demux 的调用；事件（起播/结束/错误）由

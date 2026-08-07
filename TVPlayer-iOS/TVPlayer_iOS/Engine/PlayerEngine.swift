@@ -2,23 +2,34 @@ import AVFoundation
 import Combine
 import UIKit
 
-/// 起播/卡顿检测引擎（mpv 专用）
+/// 起播/卡顿检测引擎（系统 AVPlayer 主内核 + libmpv 兜底）
 ///
-/// 内核策略：仅使用 mpv(libmpv)。不再保留 AVPlayer 兜底。
-/// - mpv 处理所有格式（隔行 1080i、非标 HLS、AVS/AVS2/AVS3、HEVC 10bit 等）。
-/// - 起播超时或失败时，直接触发换线/换台，不回退其它内核。
-/// - mpv 的统计/轨道/时间查询在后台队列采样，主线程只读快照。
+/// 内核策略：
+/// - 主内核：系统 AVPlayer。iPhone 最底层、最稳定的原生播放核心，零体积开销，
+///   绝大多数标准 HLS 源都能直接播放。
+/// - 特殊源：已知 AVPlayer 无法持续输出画面的源（live.264788.xyz 的 1080i
+///   长分片 HLS）直接走 libmpv（MPVKit），不浪费时间先试 AVPlayer。
+/// - 自动回退：AVPlayer 明确失败（item failed / 致命错误日志 / 起播超时无画面）
+///   时，本次播放自动回退 mpv 一次；mpv 再失败才触发换线。
+/// - 回退状态每次 play() 重置，杜绝旧的「hasFallenBackToAVPlayer 一次性标志」
+///   状态污染：以前某条源回退过一次后，之后所有源都不再回退、全部直接判死。
 @MainActor
 final class PlayerEngine: ObservableObject {
     // MARK: - 配置
+    /// 起播硬上限：慢 HLS 也要给足时间，避免「没几个能看」
+    static let startupHardTimeoutNs: UInt64 = 12_000_000_000
     /// 出画后保护：此期间禁止因软问题换线
     static let readyProtectNs: UInt64 = 4_000_000_000
-    /// 出画后持续缓冲超过该阈值即判定为无数据，触发换线
     static let progressStallThreshold: TimeInterval = 8.0
 
-    /// 起播超时：mpv 端（慢 HLS 长分片源单独放宽，见 startupTimeoutNs(for:)）
+    static let minUsefulSpeedKBps: Double = 5
+    static let deadSpeedKBps: Double = 0.8
+
+    /// mpv 起播超时；慢 HLS 长分片源单独放宽（见 startupTimeoutNs(for:)）
     static let mpvStartupTimeoutNs: UInt64 = 25_000_000_000
     static let mpvSlowSourceTimeoutNs: UInt64 = 40_000_000_000
+    /// AVPlayer 起播超时（系统内核通常很快；给足缓冲时间）
+    static let avPlayerStartupTimeoutNs: UInt64 = 30_000_000_000
 
     /// 慢源判定：live.264788.xyz 使用超长分片，起播/缓冲都要更久
     static func startupTimeoutNs(for url: URL) -> UInt64 {
@@ -37,19 +48,56 @@ final class PlayerEngine: ObservableObject {
         NetworkMonitor.shared.isCellular ? 18 : 24
     }
 
+    /// 已知 AVPlayer 无法持续出画的源：直接走 mpv
+    static func requiresMPV(_ url: URL) -> Bool {
+        let host = (url.host ?? "").lowercased()
+        return host == "live.264788.xyz" || host.hasSuffix(".264788.xyz")
+    }
+
+    private enum Backend {
+        case avPlayer
+        case mpv
+    }
+
+    private let avPlayer = AVPlayer()
     private let mpvEngine = MPVPlaybackEngine()
+    private var activeBackend: Backend = .avPlayer
+
     private var currentURL: URL?
     private var mpvStartupTask: Task<Void, Never>?
+    private var avStartupTask: Task<Void, Never>?
     private var requestedVolume: Float = 1
     private var cancellables = Set<AnyCancellable>()
 
     private var watchTasks: [String: Task<Void, Never>] = [:]
     private var playToken = 0
+    /// 当前 play() 的代次：过滤上一个文件残留的事件
+    private var activePlayToken = 0
+    /// 本次 play 是否已用过 mpv 回退（每次 play() 重置，无永久回退状态）
+    private var fallbackUsed = false
 
     private var stallWatchEnabled = false
-
     private var diagnosticsTask: Task<Void, Never>?
     private var stallCheckTask: Task<Void, Never>?
+    private var avDiagnosticsTask: Task<Void, Never>?
+
+    private var memoryWarningObserver: NSObjectProtocol?
+    private var renderedObserver: NSObjectProtocol?
+    private var playStartedAt: Date = .distantPast
+    private var currentURLString = ""
+    private var recentStalls: [Date] = []
+    private var lastStallAt: Date = .distantPast
+    private var lastQualitySampleAt: Date = .distantPast
+    private var failureRecorded = false
+
+    // AVPlayer 侧状态
+    private var avItem: AVPlayerItem?
+    private var avItemStatusObserver: NSKeyValueObservation?
+    private var avTimeObserver: NSKeyValueObservation?
+    private var avErrorObserver: NSObjectProtocol?
+    private var avRenderedConsecutive = 0
+    private var consecutiveBufferSeconds: Double = 0
+    private var lowSpeedReported = false
 
     @Published var isReady = false
     @Published var isPlaying = false
@@ -58,7 +106,7 @@ final class PlayerEngine: ObservableObject {
     @Published private(set) var diagnostics = PlaybackDiagnostics()
     /// 仅在缓冲、网络/缓存不足、持续低帧或音画时钟异常时显示。
     @Published private(set) var shouldShowDiagnostics = false
-    @Published private(set) var activeEngineName = "libmpv (MPVKit)"
+    @Published private(set) var activeEngineName = "系统 AVPlayer"
 
     var diagnosticsSummary: String {
         let observed = diagnostics.observedBitrate > 0 ? String(format: "%.2f Mbps", diagnostics.observedBitrate / 1_000_000) : "未知"
@@ -71,24 +119,11 @@ final class PlayerEngine: ObservableObject {
     var onReady: (() -> Void)?
     var onStartupTimeout: (() -> Void)?
     var onSilentAudio: (() -> Void)?
-    /// 网速过低/无网触发换线
+    /// 网速过低/无数据触发换线
     var onLowSpeed: ((String) -> Void)?
 
     /// 线路超时/卡顿/低速自动检测（设置可关，默认开）
     var lineTimeoutEnabled: Bool = true
-
-    private var memoryWarningObserver: NSObjectProtocol?
-    private var playStartedAt: Date = .distantPast
-    private var currentURLString = ""
-    private var recentStalls: [Date] = []
-    private var lastStallAt: Date = .distantPast
-    private var failureRecorded = false
-    /// 当前 play() 的代次：过滤上一个文件残留的 mpv 事件（起播/错误）
-    private var activePlayToken = 0
-    /// 连续缓冲秒数（每轮采样 +1）；超过 progressStallThreshold 触发换线
-    private var consecutiveBufferSeconds: Double = 0
-    /// 同一轮缓冲只触发一次 onLowSpeed，恢复播放后复位
-    private var lowSpeedReported = false
 
     init() {
         setupCacheCleanup()
@@ -99,8 +134,18 @@ final class PlayerEngine: ObservableObject {
             self?.handleMPVFailure(reason: reason)
         }
         mpvEngine.onStateChanged = { [weak self] state in
-            guard let self else { return }
+            guard let self, self.activeBackend == .mpv else { return }
             self.diagnostics.timeControlStatus = state
+        }
+        renderedObserver = NotificationCenter.default.addObserver(
+            forName: .tvPlayerVideoRendered,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let self, self.activeBackend == .avPlayer,
+                  let player = note.object as? AVPlayer, player === self.avPlayer,
+                  !self.isReady else { return }
+            self.reportReady()
         }
     }
 
@@ -118,8 +163,18 @@ final class PlayerEngine: ObservableObject {
         if let memoryWarningObserver {
             NotificationCenter.default.removeObserver(memoryWarningObserver)
         }
+        if let renderedObserver {
+            NotificationCenter.default.removeObserver(renderedObserver)
+        }
+        if let avErrorObserver {
+            NotificationCenter.default.removeObserver(avErrorObserver)
+        }
+        avItemStatusObserver?.invalidate()
+        avTimeObserver?.invalidate()
         diagnosticsTask?.cancel()
         mpvStartupTask?.cancel()
+        avStartupTask?.cancel()
+        avDiagnosticsTask?.cancel()
         cancellables.removeAll()
     }
 
@@ -128,25 +183,154 @@ final class PlayerEngine: ObservableObject {
     func play(url: URL) {
         mpvStartupTask?.cancel()
         mpvStartupTask = nil
-        activeEngineName = "libmpv (MPVKit)"
-        guard let drawable = WindowVideoSurface.shared.showMPV() else {
-            // 窗口未就绪：稍后由调用方重新触发
-            diagnostics.reason = "播放窗口未就绪"
-            onError?()
-            return
-        }
+        avStartupTask?.cancel()
+        avStartupTask = nil
 
         playToken += 1
         let token = playToken
         activePlayToken = token
+        fallbackUsed = false
         resetState(for: token)
         currentURL = url
         currentURLString = url.absoluteString
         playStartedAt = Date()
-        let profile = Self.bufferProfile(for: url)
-        diagnostics = PlaybackDiagnostics(bufferSeconds: profile.initial, engineName: activeEngineName)
         isReady = false
         isPlaying = true
+
+        if Self.requiresMPV(url) {
+            // 已知 AVPlayer 无法处理：直接 mpv，不再先试 AVPlayer
+            fallbackUsed = true
+            startMPV(url: url, token: token, asFallback: false)
+            return
+        }
+        startAVPlayer(url: url, token: token)
+    }
+
+    // MARK: - AVPlayer 主内核
+
+    private func startAVPlayer(url: URL, token: Int) {
+        activeBackend = .avPlayer
+        activeEngineName = "系统 AVPlayer"
+        avRenderedConsecutive = 0
+        diagnostics = PlaybackDiagnostics(
+            bufferSeconds: Self.initialBufferSeconds,
+            engineName: activeEngineName
+        )
+
+        guard let drawable = WindowVideoSurface.shared.showAVPlayer(avPlayer) else {
+            diagnostics.reason = "播放窗口未就绪"
+            finishFailure(reason: "播放窗口未就绪")
+            return
+        }
+        _ = drawable
+
+        let asset = AVURLAsset(url: url, options: [
+            AVURLAssetPreferPreciseDurationAndTimingKey: false,
+            "AVURLAssetHTTPHeaderFieldsKey": [
+                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
+            ],
+        ])
+        let item = AVPlayerItem(asset: asset)
+        item.preferredForwardBufferDuration = Self.initialBufferSeconds
+        item.preferredPeakBitRate = 0
+        item.canUseNetworkResourcesForLiveStreamingWhilePaused = false
+        // 等待视频在线可用，避免网络抖动时丢视频帧保音频 →「声音流畅、画面幻灯片」
+        avPlayer.automaticallyWaitsToMinimizeStalling = true
+        avItem = item
+
+        teardownAVObservers()
+        avItemStatusObserver = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
+            DispatchQueue.main.async {
+                guard let self, self.activeBackend == .avPlayer, item === self.avItem else { return }
+                if item.status == .failed {
+                    self.handleAVPlayerFailure(reason: "AVPlayer 播放器报告错误：\(item.error?.localizedDescription ?? "未知")")
+                }
+            }
+        }
+        avTimeObserver = avPlayer.observe(\.timeControlStatus, options: [.initial, .new]) { [weak self] _, _ in
+            DispatchQueue.main.async {
+                guard let self, self.activeBackend == .avPlayer else { return }
+                self.diagnostics.timeControlStatus = self.avStateText()
+            }
+        }
+        avErrorObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemFailedToPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self, self.activeBackend == .avPlayer else { return }
+            self.handleAVPlayerFailure(reason: "AVPlayer 播放中断")
+        }
+
+        avPlayer.replaceCurrentItem(with: item)
+        avPlayer.volume = requestedVolume
+        avPlayer.isMuted = requestedVolume == 0
+        avPlayer.play()
+        startLiveDiagnostics(token: token)
+        startAVDiagnostics(token: token)
+
+        guard lineTimeoutEnabled else { return }
+        let timeoutNs = Self.avPlayerStartupTimeoutNs
+        avStartupTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: timeoutNs)
+            guard let self, !Task.isCancelled, self.playToken == token,
+                  self.activeBackend == .avPlayer, !self.isReady else { return }
+            self.handleAVPlayerFailure(reason: "AVPlayer 起播超过 \(timeoutNs / 1_000_000_000) 秒")
+        }
+    }
+
+    private func avStateText() -> String {
+        switch avPlayer.timeControlStatus {
+        case .playing: return "播放中"
+        case .waitingToPlayAtSpecifiedRate: return "缓冲中"
+        case .paused: return "暂停"
+        @unknown default: return "未知"
+        }
+    }
+
+    /// AVPlayer 明确失败：回退 mpv 一次，再失败才换线
+    private func handleAVPlayerFailure(reason: String) {
+        guard playToken == activePlayToken, activeBackend == .avPlayer else { return }
+        if !fallbackUsed, let url = currentURL, !Self.requiresMPV(url) {
+            fallbackUsed = true
+            startMPV(url: url, token: playToken, asFallback: true)
+            return
+        }
+        finishFailure(reason: reason)
+    }
+
+    private func teardownAVObservers() {
+        avItemStatusObserver?.invalidate()
+        avItemStatusObserver = nil
+        avTimeObserver?.invalidate()
+        avTimeObserver = nil
+        if let avErrorObserver {
+            NotificationCenter.default.removeObserver(avErrorObserver)
+        }
+        avErrorObserver = nil
+    }
+
+    // MARK: - mpv 兜底内核
+
+    private func startMPV(url: URL, token: Int, asFallback: Bool) {
+        activeBackend = .mpv
+        activeEngineName = "libmpv (MPVKit)"
+        avStartupTask?.cancel()
+        avStartupTask = nil
+        teardownAVObservers()
+        avPlayer.replaceCurrentItem(with: nil)
+
+        guard let drawable = WindowVideoSurface.shared.showMPV() else {
+            finishFailure(reason: "播放窗口未就绪")
+            return
+        }
+
+        let profile = Self.bufferProfile(for: url)
+        diagnostics = PlaybackDiagnostics(
+            bufferSeconds: profile.initial,
+            engineName: activeEngineName,
+            reason: asFallback ? "AVPlayer 起播失败，已自动回退 mpv" : ""
+        )
         mpvEngine.play(url: url, drawable: drawable, volume: requestedVolume)
         startLiveDiagnostics(token: token)
 
@@ -155,22 +339,48 @@ final class PlayerEngine: ObservableObject {
         mpvStartupTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: timeoutNs)
             guard let self, !Task.isCancelled, self.playToken == token,
-                  !self.isReady else { return }
-            self.handleMPVFailure(reason: "mpv 起播超过 \(timeoutNs / 1_000_000_000) 秒")
+                  self.activeBackend == .mpv, !self.isReady else { return }
+            self.finishFailure(reason: "mpv 起播超过 \(timeoutNs / 1_000_000_000) 秒")
         }
     }
 
     private func handleMPVPlaying() {
-        guard playToken == activePlayToken else { return }
+        guard playToken == activePlayToken, activeBackend == .mpv else { return }
+        reportReady()
+    }
+
+    private func handleMPVFailure(reason: String) {
+        guard playToken == activePlayToken, activeBackend == .mpv else { return }
+        finishFailure(reason: reason)
+    }
+
+    /// 统一失败出口：mpv 已用尽 / mpv 自身失败 → 通知上层换线
+    private func finishFailure(reason: String) {
         mpvStartupTask?.cancel()
         mpvStartupTask = nil
+        avStartupTask?.cancel()
+        avStartupTask = nil
+        diagnostics.reason = reason
+        recordFailureOnce()
+        if isReady {
+            onError?()
+        } else {
+            onStartupTimeout?()
+        }
+    }
+
+    private func reportReady() {
+        mpvStartupTask?.cancel()
+        mpvStartupTask = nil
+        avStartupTask?.cancel()
+        avStartupTask = nil
         isPlaying = true
         guard !isReady else { return }
         isReady = true
         diagnostics.timeControlStatus = "播放中"
         diagnostics.waitingReason = "无"
         diagnostics.isBufferEmpty = false
-        diagnostics.reason = "mpv 已输出画面"
+        diagnostics.reason = activeBackend == .avPlayer ? "AVPlayer 已出画" : "mpv 已输出画面"
         let startupSeconds = playStartedAt == .distantPast
             ? 0 : Date().timeIntervalSince(playStartedAt)
         LineQualityStore.shared.recordStart(
@@ -182,23 +392,12 @@ final class PlayerEngine: ObservableObject {
 
         stallWatchEnabled = false
         scheduleTask(named: "readyProtect", token: playToken, timeout: Self.readyProtectNs) { [weak self] in
-            guard let self, self.playToken == playToken else { return }
+            // scheduleTask 内部已按 token 过滤，此处只需存活校验
+            guard let self else { return }
             self.stallWatchEnabled = true
-            self.startStallCheck(token: playToken)
-        }
-    }
-
-    private func handleMPVFailure(reason: String) {
-        guard playToken == activePlayToken else { return }
-        mpvStartupTask?.cancel()
-        mpvStartupTask = nil
-        diagnostics.reason = reason
-        recordFailureOnce()
-        // mpv 失败：直接通知换线，不回退其它内核
-        if isReady {
-            onError?()
-        } else {
-            onStartupTimeout?()
+            if self.activeBackend == .mpv {
+                self.startStallCheck(token: playToken)
+            }
         }
     }
 
@@ -211,13 +410,21 @@ final class PlayerEngine: ObservableObject {
     }
 
     func pause() {
-        mpvEngine.pause()
+        if activeBackend == .mpv {
+            mpvEngine.pause()
+        } else {
+            avPlayer.pause()
+        }
         isPlaying = false
     }
 
     func resume() {
         guard hasCurrentMedia else { return }
-        mpvEngine.resume()
+        if activeBackend == .mpv {
+            mpvEngine.resume()
+        } else {
+            avPlayer.play()
+        }
         isPlaying = true
         WindowVideoSurface.shared.rebindPlayer()
     }
@@ -232,17 +439,29 @@ final class PlayerEngine: ObservableObject {
         if !enabled {
             mpvStartupTask?.cancel()
             mpvStartupTask = nil
+            avStartupTask?.cancel()
+            avStartupTask = nil
             stopStallCheck()
             cancelAllTasks()
         } else if !isReady, currentURL != nil {
             let token = playToken
             let timeoutNs = Self.startupTimeoutNs(for: currentURL!)
-            mpvStartupTask?.cancel()
-            mpvStartupTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: timeoutNs)
-                guard let self, !Task.isCancelled, self.playToken == token,
-                      !self.isReady else { return }
-                self.handleMPVFailure(reason: "mpv 起播超过 \(timeoutNs / 1_000_000_000) 秒")
+            if activeBackend == .mpv {
+                mpvStartupTask?.cancel()
+                mpvStartupTask = Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: timeoutNs)
+                    guard let self, !Task.isCancelled, self.playToken == token,
+                          self.activeBackend == .mpv, !self.isReady else { return }
+                    self.finishFailure(reason: "mpv 起播超过 \(timeoutNs / 1_000_000_000) 秒")
+                }
+            } else {
+                avStartupTask?.cancel()
+                avStartupTask = Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: Self.avPlayerStartupTimeoutNs)
+                    guard let self, !Task.isCancelled, self.playToken == token,
+                          self.activeBackend == .avPlayer, !self.isReady else { return }
+                    self.handleAVPlayerFailure(reason: "AVPlayer 起播超过 \(Self.avPlayerStartupTimeoutNs / 1_000_000_000) 秒")
+                }
             }
         }
     }
@@ -251,11 +470,17 @@ final class PlayerEngine: ObservableObject {
         playToken += 1
         mpvStartupTask?.cancel()
         mpvStartupTask = nil
+        avStartupTask?.cancel()
+        avStartupTask = nil
         mpvEngine.stop()
+        teardownAVObservers()
+        avPlayer.replaceCurrentItem(with: nil)
         cancelAllTasks()
         stopStallCheck()
         diagnosticsTask?.cancel()
         diagnosticsTask = nil
+        avDiagnosticsTask?.cancel()
+        avDiagnosticsTask = nil
         currentURL = nil
         isPlaying = false
         isReady = false
@@ -268,13 +493,21 @@ final class PlayerEngine: ObservableObject {
         get { requestedVolume }
         set {
             requestedVolume = max(0, min(1, newValue))
-            mpvEngine.volume = requestedVolume
+            if activeBackend == .mpv {
+                mpvEngine.volume = requestedVolume
+            } else {
+                avPlayer.volume = requestedVolume
+                avPlayer.isMuted = requestedVolume == 0
+            }
         }
     }
 
     /// 当前播放地址是否有可用的声音轨
     var hasActiveAudioTrack: Bool {
-        mpvEngine.hasAudioTrack
+        if activeBackend == .mpv {
+            return mpvEngine.hasAudioTrack
+        }
+        return avItem?.tracks.contains { $0.assetTrack?.mediaType == .audio } ?? false
     }
 
     // MARK: - Private — State Management
@@ -282,15 +515,20 @@ final class PlayerEngine: ObservableObject {
     private func resetState(for token: Int) {
         mpvStartupTask?.cancel()
         mpvStartupTask = nil
+        avStartupTask?.cancel()
+        avStartupTask = nil
         cancelAllTasks()
         stopStallCheck()
         diagnosticsTask?.cancel()
         diagnosticsTask = nil
+        avDiagnosticsTask?.cancel()
+        avDiagnosticsTask = nil
         recentStalls.removeAll()
         lastStallAt = .distantPast
         failureRecorded = false
         consecutiveBufferSeconds = 0
         lowSpeedReported = false
+        avRenderedConsecutive = 0
         shouldShowDiagnostics = false
         diagnostics = PlaybackDiagnostics(
             bufferSeconds: Self.initialBufferSeconds,
@@ -328,7 +566,7 @@ final class PlayerEngine: ObservableObject {
         watchTasks[name] = nil
     }
 
-    // MARK: - 播放中卡顿检测
+    // MARK: - 播放中卡顿检测（mpv 后端）
 
     /// mpv 播放中健康评估：core-idle / paused-for-cache 持续过久 → 换线
     private func startStallCheck(token: Int) {
@@ -361,7 +599,6 @@ final class PlayerEngine: ObservableObject {
                 if sample.stateText == "缓冲中" {
                     self.registerStall()
                     self.consecutiveBufferSeconds += 1
-                    // 持续缓冲超过阈值且本轮未报过 → 判定无数据，触发换线
                     if self.consecutiveBufferSeconds >= Self.progressStallThreshold, !self.lowSpeedReported {
                         self.lowSpeedReported = true
                         self.onLowSpeed?("持续缓冲无数据，自动换线")
@@ -373,8 +610,6 @@ final class PlayerEngine: ObservableObject {
             }
         }
     }
-
-    private var lastQualitySampleAt: Date = .distantPast
 
     private func stopStallCheck() {
         stallCheckTask?.cancel()
@@ -415,28 +650,108 @@ final class PlayerEngine: ObservableObject {
     }
 
     private func refreshDiagnostics(reason: String?) {
-        let sample = mpvEngine.diagnosticsSample()
-        observedSpeedKBps = sample.observedBitrate > 0
-            ? sample.observedBitrate / 8 / 1024 : 0
+        if activeBackend == .mpv {
+            let sample = mpvEngine.diagnosticsSample()
+            observedSpeedKBps = sample.observedBitrate > 0
+                ? sample.observedBitrate / 8 / 1024 : 0
+            diagnostics = PlaybackDiagnostics(
+                observedBitrate: sample.observedBitrate,
+                averageVideoBitrate: sample.averageVideoBitrate,
+                currentVideoFrameRate: sample.outputFrameRate,
+                nominalVideoFrameRate: sample.nominalFrameRate,
+                droppedVideoFrames: sample.droppedFrames,
+                droppedFramesPerSecond: sample.droppedFramesPerSecond,
+                videoWidth: sample.width,
+                videoHeight: sample.height,
+                stallCount: recentStalls.count,
+                bufferSeconds: 0,
+                timeControlStatus: sample.stateText,
+                waitingReason: sample.waitingReason,
+                isLikelyToKeepUp: sample.hasVideoOutput && sample.stateText == "播放中",
+                isBufferEmpty: false,
+                playbackClockSeconds: sample.playbackClockSeconds,
+                engineName: activeEngineName,
+                reason: reason ?? diagnostics.reason
+            )
+        }
+    }
+
+    // MARK: - AVPlayer 轻量采样（2s，主线程安全）
+
+    private func startAVDiagnostics(token: Int) {
+        avDiagnosticsTask?.cancel()
+        avDiagnosticsTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard let self, !Task.isCancelled, self.playToken == token,
+                      self.activeBackend == .avPlayer else { return }
+                self.sampleAVDiagnostics()
+            }
+        }
+    }
+
+    private func sampleAVDiagnostics() {
+        guard let item = avItem else { return }
+        let log = item.accessLog()
+        let event = log?.events.last
+        let observed = event?.observedBitrate ?? 0
+        let bitrate = event?.indicatedBitrate ?? 0
+        let size = item.presentationSize
+        let ranges = item.loadedTimeRanges
+        let bufferedEnd = ranges.compactMap { value -> TimeInterval? in
+            let end = CMTimeGetSeconds(CMTimeRangeGetEnd(value.timeRangeValue))
+            return end.isFinite ? end : nil
+        }.max() ?? 0
+        let current = CMTimeGetSeconds(item.currentTime())
+        let buffered = max(0, bufferedEnd - (current.isFinite ? current : 0))
+        let state = avStateText()
+        let videoTrack = item.tracks.first { $0.assetTrack?.mediaType == .video }?.assetTrack
+
+        observedSpeedKBps = observed > 0 ? observed / 8 / 1024 : 0
         diagnostics = PlaybackDiagnostics(
-            observedBitrate: sample.observedBitrate,
-            averageVideoBitrate: sample.averageVideoBitrate,
-            currentVideoFrameRate: sample.outputFrameRate,
-            nominalVideoFrameRate: sample.nominalFrameRate,
-            droppedVideoFrames: sample.droppedFrames,
-            droppedFramesPerSecond: sample.droppedFramesPerSecond,
-            videoWidth: sample.width,
-            videoHeight: sample.height,
+            observedBitrate: Double(observed),
+            averageVideoBitrate: Double(bitrate),
+            currentVideoFrameRate: 0,
+            nominalVideoFrameRate: videoTrack.map { Double($0.nominalFrameRate) } ?? 0,
+            droppedVideoFrames: 0,
+            droppedFramesPerSecond: 0,
+            videoWidth: Int(size.width),
+            videoHeight: Int(size.height),
             stallCount: recentStalls.count,
-            bufferSeconds: 0,
-            timeControlStatus: sample.stateText,
-            waitingReason: sample.waitingReason,
-            isLikelyToKeepUp: sample.hasVideoOutput && sample.stateText == "播放中",
-            isBufferEmpty: false,
-            playbackClockSeconds: sample.playbackClockSeconds,
+            bufferSeconds: buffered,
+            timeControlStatus: state,
+            waitingReason: avPlayer.timeControlStatus == .waitingToPlayAtSpecifiedRate
+                ? "AVPlayer 正在缓冲/等待数据" : "无",
+            isLikelyToKeepUp: item.isPlaybackLikelyToKeepUp && state == "播放中",
+            isBufferEmpty: item.isPlaybackBufferEmpty,
+            playbackClockSeconds: current.isFinite ? current : 0,
             engineName: activeEngineName,
-            reason: reason ?? diagnostics.reason
+            reason: diagnostics.reason
         )
+
+        // 起播兜底：视频尺寸就绪 + 播放中（连续两次采样）
+        if item.status == .readyToPlay, state == "播放中",
+           size.width > 1, size.height > 1 {
+            avRenderedConsecutive += 1
+            if avRenderedConsecutive >= 2, !isReady {
+                reportReady()
+            }
+        } else {
+            avRenderedConsecutive = 0
+        }
+
+        // 卡顿/无数据
+        if item.isPlaybackBufferEmpty || state == "缓冲中" {
+            registerStall()
+            consecutiveBufferSeconds += 1
+            if consecutiveBufferSeconds >= Self.progressStallThreshold, !lowSpeedReported {
+                lowSpeedReported = true
+                onLowSpeed?("持续缓冲无数据，自动换线")
+            }
+        } else {
+            consecutiveBufferSeconds = 0
+            lowSpeedReported = false
+        }
     }
 }
 
