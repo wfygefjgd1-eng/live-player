@@ -1178,11 +1178,22 @@ final class PlayerViewModel: ObservableObject {
     }
 
     func noteInterruptionBegan() {
+        // 中断期间系统已停止音频输出，同步暂停状态，避免 UI 误以为仍在播放
         wasPlayingBeforeInterruption = player.isPlaying && !userPaused
+        if player.isPlaying {
+            player.pause()
+            playbackPaused = true
+        }
     }
 
     func noteInterruptionEnded(shouldResume: Bool) {
-        guard shouldResume, wasPlayingBeforeInterruption, !userPaused else { return }
+        // 用户拒接来电（系统不建议恢复）：保持暂停态，让"恢复播放"按钮出现，
+        // 避免 player.isPlaying 仍为 true 造成单击被当成 pause 的错乱。
+        guard shouldResume, wasPlayingBeforeInterruption, !userPaused else {
+            // 中断结束后即使不恢复，也应确保音频会话可再次激活（下次播放需要）
+            try? AVAudioSession.sharedInstance().setActive(true)
+            return
+        }
         // 中断结束后先确保音频会话已重新激活，再恢复播放（AVPlayer 分支尤其需要）
         try? AVAudioSession.sharedInstance().setActive(true)
         resume()

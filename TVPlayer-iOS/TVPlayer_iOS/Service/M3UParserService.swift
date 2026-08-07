@@ -61,16 +61,25 @@ class M3UParserService {
         return Array(channels.values)
     }
 
-    /// URL 合法性校验：必须是 http/https 且有可解析的主机名。
-    /// 注：此处过滤脏数据，但不过度约束——rtmp/rtsp 等非标准协议仍保留给其他路径。
+    /// URL 合法性校验：放行 http/https/rtmp/rtsp 等播放管线支持的协议。
+    /// 与 PlayerViewModel.playLineLoop / autoSwitchLine 的协议白名单保持一致，
+    /// 否则 rtmp/rtsp 单线源会在解析阶段被整行丢弃、频道永远进不了列表。
+    /// 过滤目标是脏数据（HTML 误解析、js 脚本行、纯文本）而非特定协议。
     private static func isValidMediaURL(_ raw: String) -> Bool {
         guard let url = URL(string: raw),
-              let scheme = url.scheme?.lowercased(),
-              scheme == "http" || scheme == "https",
-              url.host != nil else {
+              let scheme = url.scheme?.lowercased() else {
             return false
         }
-        return true
+        switch scheme {
+        case "http", "https", "rtmp", "rtsp", "udp", "rtp", "rtmps":
+            // http/https 需有可解析主机名；其余协议交由播放器尝试，仅过滤明显垃圾
+            if scheme == "http" || scheme == "https" {
+                return url.host != nil
+            }
+            return true
+        default:
+            return false
+        }
     }
 
     static func isCCTVKey(_ key: String) -> Bool {

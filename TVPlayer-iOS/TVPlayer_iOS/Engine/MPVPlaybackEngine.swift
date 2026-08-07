@@ -117,7 +117,9 @@ final class MPVPlaybackEngine {
 
         reportedPlaying = false
         samplerCancelled = true
+        snapshotLock.lock()
         lastSnapshot = DiagnosticsSample()
+        snapshotLock.unlock()
         activeURL = url
 
         logTailLock.lock()
@@ -162,7 +164,9 @@ final class MPVPlaybackEngine {
         samplerCancelled = true
         command("stop", args: [])
         activeURL = nil
+        snapshotLock.lock()
         lastSnapshot = DiagnosticsSample()
+        snapshotLock.unlock()
     }
 
     var isPlaying: Bool {

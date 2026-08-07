@@ -218,6 +218,11 @@ final class PlayerEngine: ObservableObject {
         isSwitching = true
         switchStartedAt = Date()
         lastValidSpeedSampleAt = .distantPast
+        // 复位网速显示与差分测速状态：切换/新内核后立即归零，
+        // 避免转圈下残留旧频道速度、或差分 guard 吃着旧流的累计字节而长期失效。
+        observedSpeedKBps = 0
+        lastAVTotalBytes = 0
+        lastAVSampleTime = .distantPast
 
         if Self.requiresMPV(url) {
             // 已知 AVPlayer 无法处理：直接 mpv，不再先试 AVPlayer
@@ -339,6 +344,10 @@ final class PlayerEngine: ObservableObject {
         activeEngineName = "libmpv (MPVKit)"
         avStartupTask?.cancel()
         avStartupTask = nil
+        // 取消 AVPlayer 分支的 0.5s 采样循环：mpv 阶段不需要它，否则残留一个
+        // 每 0.5s 触发、仅因 activeBackend != .avPlayer 就立即 return 的空转任务。
+        avDiagnosticsTask?.cancel()
+        avDiagnosticsTask = nil
         teardownAVObservers()
         avPlayer.replaceCurrentItem(with: nil)
 
@@ -409,9 +418,12 @@ final class PlayerEngine: ObservableObject {
         let elapsed = Date().timeIntervalSince(switchStartedAt)
         let remaining = Self.minSwitchDisplayTime - elapsed
         if remaining > 0 {
+            // 用 playToken 守卫：若在展示窗口内又切到新台（token 已变），
+            // 不得把新台的「切换中」转圈提前关掉。
+            let token = playToken
             Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
-                guard let self else { return }
+                guard let self, !Task.isCancelled, self.playToken == token else { return }
                 self.isSwitching = false
             }
         } else {

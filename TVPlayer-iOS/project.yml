@@ -49,12 +49,22 @@ targets:
         UILaunchStoryboardName: LaunchScreen
         UIApplicationSupportsIndirectInputEvents: true
         UIInterfaceStyle: Dark
+        # 声明场景生命周期入口：AppDelegate 用 configurationForConnecting 编程式注册
+        # SceneDelegate，但没有 UIApplicationSceneManifest 时系统不会创建 UIWindowScene，
+        # 主窗口(installMainWindow)永不触发 → 启动黑屏。此 manifest 必须保留。
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+          UISceneConfigurations:
+            UIWindowSceneSessionRoleApplication:
+              - UISceneConfigurationName: Default Configuration
+                UISceneDelegateClassName: "$(PRODUCT_MODULE_NAME).SceneDelegate"
         NSLocalNetworkUsageDescription: "用于加载直播源与频道列表"
         NSAppTransportSecurity:
-          # 仅对媒体加载放行 HTTP（iOS 10+ 媒体豁免，专为播放器设计）。
-          # 相比 NSAllowsArbitraryLoads=true 的全局豁免，非媒体请求仍受 ATS 保护，
-          # App Store 审核更友好。若个别 http 域名仍被拒可加 NSExceptionDomains 白名单。
-          NSAllowsArbitraryLoadsForMedia: true
+          # 必须全局放行 HTTP：NetworkService 用 URLSession 拉取 m3u 播放列表，
+          # 而用户自定义源常是 http 域名（动态、不可枚举）。NSAllowsArbitraryLoadsForMedia
+          # 只豁免 AVFoundation 媒体连接，不豁免 URLSession 的普通请求 —— 收窄会导致
+          # 自定义 http m3u 源加载不到频道（v2.3.8 实测回归）。自签侧载场景审核风险可忽略。
+          NSAllowsArbitraryLoads: true
         UIBackgroundModes:
           - audio
     settings:
