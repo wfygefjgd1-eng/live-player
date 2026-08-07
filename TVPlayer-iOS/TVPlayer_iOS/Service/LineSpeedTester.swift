@@ -79,13 +79,15 @@ final class LineSpeedTester {
         }
 
         let start = Date()
-        // 单次 Range 请求使用完整预检预算；拿到响应头后立即结束，不下载直播响应体。
+        // 单次 Range 请求使用完整预检预算；拿到响应头后立即取消响应体流。
+        // 直播流响应体永不结束，若不取消会泄漏一条连接（同主机连接耗尽后全局播放失败）。
         var req = URLRequest(url: u)
         req.httpMethod = "GET"
         req.timeoutInterval = timeout
         req.setValue("bytes=0-1", forHTTPHeaderField: "Range")
         do {
-            let (_, resp) = try await session.bytes(for: req)
+            let (bytes, resp) = try await session.bytes(for: req)
+            bytes.task.cancel()
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             if code == 404 || code == 403 || code == 410 || code == 451 {
                 hardFailCache[url] = Date()

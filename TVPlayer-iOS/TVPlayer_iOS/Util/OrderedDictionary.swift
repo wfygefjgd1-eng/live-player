@@ -30,12 +30,12 @@ struct OrderedDictionary<Key: Hashable, Value> {
     /// 按键值删除（O(1) 平均）
     @discardableResult
     mutating func removeValue(forKey key: Key) -> Value? {
+        let value = dict[key]
         dict.removeValue(forKey: key)
         if let idx = _keys.firstIndex(of: key) {
             _keys.remove(at: idx)
-            return dict[key]
         }
-        return nil
+        return value
     }
 
     /// 追加到末尾（不检查重复）

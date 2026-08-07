@@ -176,29 +176,12 @@ final class NetworkService {
             return ([], NetworkFetchError.allFailed.errorDescription)
         }
 
-        // 全部并发竞速
+        // 全部并发竞速：raceFetch 已对所有源完整尝试，取最快成功结果；
+        // 返回 nil 表示全部失败，无需再串行重试（会重复请求并拖慢加载）
         if let raced = await raceFetch(urls: urls) {
             return (raced, nil)
         }
-
-        // 全部失败，返回错误
-        var lastError: String?
-        for url in urls {
-            do {
-                let body = try await fetchTextWithMirrors(url: url)
-                let parsed = await parseOffMain(body)
-                if parsed.isEmpty {
-                    lastError = NetworkFetchError.parseEmpty.errorDescription
-                    continue
-                }
-                return (parsed, nil)
-            } catch let e as NetworkFetchError {
-                lastError = e.errorDescription
-            } catch {
-                lastError = error.localizedDescription
-            }
-        }
-        return ([], lastError ?? NetworkFetchError.allFailed.errorDescription)
+        return ([], NetworkFetchError.allFailed.errorDescription)
     }
 
     /// 并发请求所有 URL，取最快返回的频道列表

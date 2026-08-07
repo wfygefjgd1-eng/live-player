@@ -264,10 +264,16 @@ final class PlayerViewModel: ObservableObject {
 
         // startup() already performs a network refresh. Every later foreground
         // entry force-reloads the currently selected source, ignoring stale lists.
+        // 正在稳定播放时不打断画面：仅静默刷新线路数据，出画后再由
+        // onChannelsLoaded(silent:) 决定是否用最新线路重新起播。
         let now = Date()
         if now.timeIntervalSince(lastEntrySourceReloadAt) >= 2 {
             lastEntrySourceReloadAt = now
-            reloadActiveSource(entryRefresh: true)
+            if player.isReady && !channels.isEmpty {
+                loadChannels(force: true, silent: true, preferActiveOnly: true)
+            } else {
+                reloadActiveSource(entryRefresh: true)
+            }
             return
         }
         if channels.isEmpty {

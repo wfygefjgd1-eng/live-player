@@ -11,17 +11,23 @@ import UIKit
 @MainActor
 final class PlayerEngine: ObservableObject {
     // MARK: - 配置
-    /// 起播硬上限：慢 HLS 也要给足时间，避免「没几个能看」
-    static let startupHardTimeoutNs: UInt64 = 12_000_000_000
     /// 出画后保护：此期间禁止因软问题换线
     static let readyProtectNs: UInt64 = 4_000_000_000
+    /// 出画后持续缓冲超过该阈值即判定为无数据，触发换线
     static let progressStallThreshold: TimeInterval = 8.0
 
-    static let minUsefulSpeedKBps: Double = 5
-    static let deadSpeedKBps: Double = 0.8
-
-    /// 起播超时：mpv 端
+    /// 起播超时：mpv 端（慢 HLS 长分片源单独放宽，见 startupTimeoutNs(for:)）
     static let mpvStartupTimeoutNs: UInt64 = 25_000_000_000
+    static let mpvSlowSourceTimeoutNs: UInt64 = 40_000_000_000
+
+    /// 慢源判定：live.264788.xyz 使用超长分片，起播/缓冲都要更久
+    static func startupTimeoutNs(for url: URL) -> UInt64 {
+        let host = (url.host ?? "").lowercased()
+        if host == "live.264788.xyz" || host.hasSuffix(".264788.xyz") {
+            return mpvSlowSourceTimeoutNs
+        }
+        return mpvStartupTimeoutNs
+    }
 
     // 起播参数仍保留（bufferProfile 用于诊断展示）
     static let initialBufferSeconds: TimeInterval = 6
@@ -77,6 +83,12 @@ final class PlayerEngine: ObservableObject {
     private var recentStalls: [Date] = []
     private var lastStallAt: Date = .distantPast
     private var failureRecorded = false
+    /// 当前 play() 的代次：过滤上一个文件残留的 mpv 事件（起播/错误）
+    private var activePlayToken = 0
+    /// 连续缓冲秒数（每轮采样 +1）；超过 progressStallThreshold 触发换线
+    private var consecutiveBufferSeconds: Double = 0
+    /// 同一轮缓冲只触发一次 onLowSpeed，恢复播放后复位
+    private var lowSpeedReported = false
 
     init() {
         setupCacheCleanup()
@@ -126,6 +138,7 @@ final class PlayerEngine: ObservableObject {
 
         playToken += 1
         let token = playToken
+        activePlayToken = token
         resetState(for: token)
         currentURL = url
         currentURLString = url.absoluteString
@@ -138,15 +151,17 @@ final class PlayerEngine: ObservableObject {
         startLiveDiagnostics(token: token)
 
         guard lineTimeoutEnabled else { return }
+        let timeoutNs = Self.startupTimeoutNs(for: url)
         mpvStartupTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: Self.mpvStartupTimeoutNs)
+            try? await Task.sleep(nanoseconds: timeoutNs)
             guard let self, !Task.isCancelled, self.playToken == token,
                   !self.isReady else { return }
-            self.handleMPVFailure(reason: "mpv 起播超过 \(Self.mpvStartupTimeoutNs / 1_000_000_000) 秒")
+            self.handleMPVFailure(reason: "mpv 起播超过 \(timeoutNs / 1_000_000_000) 秒")
         }
     }
 
     private func handleMPVPlaying() {
+        guard playToken == activePlayToken else { return }
         mpvStartupTask?.cancel()
         mpvStartupTask = nil
         isPlaying = true
@@ -174,6 +189,7 @@ final class PlayerEngine: ObservableObject {
     }
 
     private func handleMPVFailure(reason: String) {
+        guard playToken == activePlayToken else { return }
         mpvStartupTask?.cancel()
         mpvStartupTask = nil
         diagnostics.reason = reason
@@ -220,12 +236,13 @@ final class PlayerEngine: ObservableObject {
             cancelAllTasks()
         } else if !isReady, currentURL != nil {
             let token = playToken
+            let timeoutNs = Self.startupTimeoutNs(for: currentURL!)
             mpvStartupTask?.cancel()
             mpvStartupTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: Self.mpvStartupTimeoutNs)
+                try? await Task.sleep(nanoseconds: timeoutNs)
                 guard let self, !Task.isCancelled, self.playToken == token,
                       !self.isReady else { return }
-                self.handleMPVFailure(reason: "mpv 起播超过 25 秒")
+                self.handleMPVFailure(reason: "mpv 起播超过 \(timeoutNs / 1_000_000_000) 秒")
             }
         }
     }
@@ -272,6 +289,8 @@ final class PlayerEngine: ObservableObject {
         recentStalls.removeAll()
         lastStallAt = .distantPast
         failureRecorded = false
+        consecutiveBufferSeconds = 0
+        lowSpeedReported = false
         shouldShowDiagnostics = false
         diagnostics = PlaybackDiagnostics(
             bufferSeconds: Self.initialBufferSeconds,
@@ -341,6 +360,15 @@ final class PlayerEngine: ObservableObject {
                 // 卡顿：paused-for-cache 持续
                 if sample.stateText == "缓冲中" {
                     self.registerStall()
+                    self.consecutiveBufferSeconds += 1
+                    // 持续缓冲超过阈值且本轮未报过 → 判定无数据，触发换线
+                    if self.consecutiveBufferSeconds >= Self.progressStallThreshold, !self.lowSpeedReported {
+                        self.lowSpeedReported = true
+                        self.onLowSpeed?("持续缓冲无数据，自动换线")
+                    }
+                } else {
+                    self.consecutiveBufferSeconds = 0
+                    self.lowSpeedReported = false
                 }
             }
         }
@@ -358,7 +386,7 @@ final class PlayerEngine: ObservableObject {
         let now = Date()
         lastStallAt = now
         recentStalls = recentStalls.filter { now.timeIntervalSince($0) <= 45 }
-        // 防抖：45 秒内同一轮卡顿只记一次
+        // 防抖：5 秒内同一轮卡顿只记一次
         if let last = recentStalls.last, now.timeIntervalSince(last) < 5 { return }
         recentStalls.append(now)
         LineQualityStore.shared.recordStall(url: currentURLString)

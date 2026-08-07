@@ -4,7 +4,7 @@ import Metal
 import AVFAudio
 import Libmpv
 
-/// mpv / libmpv 直播内核（MPVKit 预编译库）。AVPlayer 仅在 mpv 无法打开流时由 PlayerEngine 兜底。
+/// mpv / libmpv 直播内核（MPVKit 预编译库）。仅此一个内核，无 AVPlayer 兜底。
 ///
 /// 稳定性要点：与 VLC 内核同构——所有 mpv 统计/轨道/时间查询都在后台队列采样，
 /// 主线程只读快照，绝不触碰可能阻塞 demux 的调用；事件（起播/结束/错误）由
@@ -324,8 +324,10 @@ final class MPVPlaybackEngine {
         lastSnapshot = snapshot
         snapshotLock.unlock()
 
-        // 兜底出画判定：音频-only 流没有 VIDEO_RECONFIG，用活跃状态代替
-        if !coreIdle && !pausedForCache && !paused && !reportedPlaying {
+        // 兜底出画判定：仅音频-only 流（没有 VIDEO_RECONFIG）且已有视频参数时才补报。
+        // 绝不能仅凭 core-idle=false 上报：demux 一有活动 idle 就变 false，
+        // 若在此上报会让上层误判「已出画」，起播超时被取消 → 黑屏永不换线。
+        if hasVideo && !coreIdle && !pausedForCache && !paused && !reportedPlaying {
             reportPlayingIfNeeded()
         }
     }

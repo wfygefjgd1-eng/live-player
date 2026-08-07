@@ -16,8 +16,8 @@ struct SourceManagementSheet: View {
                         .frame(height: 40)
                         .background(Color(.secondarySystemBackground))
                         .clipShape(Capsule())
-                        .autocapitalization(.none)
-                        .disableAutocorrection(true)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
                         .keyboardType(.URL)
                         .submitLabel(.done)
                         .onSubmit { add() }
