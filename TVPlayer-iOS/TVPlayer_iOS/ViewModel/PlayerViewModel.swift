@@ -709,7 +709,12 @@ final class PlayerViewModel: ObservableObject {
         ensureCCTV1FirstInBrowseOrder(sections(search: "").flatMap(\.channels))
     }
 
-    private func advanceChannel(delta: Int, userInitiated: Bool) {
+    /// 手指拖动换台：跳过 300ms 防抖，跨阈值立即跟手切换
+    func channelDragSwitch(delta: Int) {
+        advanceChannel(delta: delta, userInitiated: true, debounced: false)
+    }
+
+    private func advanceChannel(delta: Int, userInitiated: Bool, debounced: Bool = true) {
         if panelVisible { return }
         let ordered = browseOrderedChannels()
         guard !ordered.isEmpty else { return }
@@ -718,7 +723,7 @@ final class PlayerViewModel: ObservableObject {
             recoverGeneration &+= 1
             pendingAutoSwitchReminder = nil
             let now = Date()
-            if now.timeIntervalSince(lastChannelSwitchAt) < channelSwitchDebounceInterval { return }
+            if debounced, now.timeIntervalSince(lastChannelSwitchAt) < channelSwitchDebounceInterval { return }
             lastChannelSwitchAt = now
             autoRecoverChannelHops = 0
         }
@@ -738,6 +743,8 @@ final class PlayerViewModel: ObservableObject {
         if userInitiated {
             pendingAutoSwitchReminder = nil
             panelVisible = false
+            // 立即出台名，不等预检/起播完成，拖动才跟手
+            showChannelOSD()
         }
         triedLineIndices.removeAll()
         playCurrent(resetTried: true)

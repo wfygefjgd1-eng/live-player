@@ -11,6 +11,9 @@ struct ContentView: View {
     @State private var numberInput = ""
     @State private var numberInputTask: Task<Void, Never>?
     @State private var singleTapTask: Task<Void, Never>?
+    /// 拖动换台：累计纵向位移，每跨 44pt 立即切一台（跟手）
+    @State private var channelDragAccum: CGFloat = 0
+    @State private var channelDragSwitchCount = 0
 
     var body: some View {
         ZStack {
@@ -157,6 +160,21 @@ struct ContentView: View {
                 }
                 .allowsHitTesting(false)
 
+                // 左上角常驻实时网速：缓冲时自动转圈
+                VStack {
+                    HStack {
+                        NetworkSpeedBadge(
+                            speedKBps: vm.player.observedSpeedKBps,
+                            isBuffering: vm.player.isBuffering
+                        )
+                        .padding(.top, top + 4)
+                        .padding(.leading, max(geo.safeAreaInsets.leading, 12) + 4)
+                        Spacer(minLength: 0)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .allowsHitTesting(false)
+
                 if vm.showDiagnosticsOverlay || vm.player.shouldShowDiagnostics {
                     VStack {
                         HStack {
@@ -218,18 +236,38 @@ struct ContentView: View {
     }
 
     private func playerDragGesture() -> some Gesture {
-        DragGesture(minimumDistance: 28)
+        DragGesture(minimumDistance: 20)
             .onChanged { value in
                 guard !vm.panelVisible else { return }
                 let w = max(UIScreen.main.bounds.width, UIScreen.main.bounds.height, 1)
                 let sx = value.startLocation.x
                 let dy = value.translation.height
-                guard abs(dy) > abs(value.translation.width) else { return }
+                let dx = value.translation.width
                 if sx > w * 0.65 {
-                    vm.handleVolumeDrag(translationHeight: dy, ended: false)
+                    if abs(dy) > abs(dx) {
+                        vm.handleVolumeDrag(translationHeight: dy, ended: false)
+                    }
+                    return
+                }
+                guard abs(dy) > abs(dx) else { return }
+                // 拖动换台：每跨 44pt 立即切换一台，跨阈值持续跟手
+                channelDragAccum += dy
+                while channelDragAccum >= 44 {
+                    channelDragAccum -= 44
+                    channelDragSwitchCount += 1
+                    vm.channelDragSwitch(delta: 1)
+                }
+                while channelDragAccum <= -44 {
+                    channelDragAccum += 44
+                    channelDragSwitchCount += 1
+                    vm.channelDragSwitch(delta: -1)
                 }
             }
             .onEnded { value in
+                defer {
+                    channelDragAccum = 0
+                    channelDragSwitchCount = 0
+                }
                 guard !vm.panelVisible else { return }
                 let w = max(UIScreen.main.bounds.width, UIScreen.main.bounds.height, 1)
                 let sx = value.startLocation.x
@@ -240,11 +278,13 @@ struct ContentView: View {
                     return
                 }
                 if abs(dx) > abs(dy) && abs(dx) > 50 {
-                    if dx > 0 { vm.switchSource(direction: 1) }
+                    // 从右往左滑 = 下一线路（1→2），从左往右滑 = 上一线路
+                    if dx < 0 { vm.switchSource(direction: 1) }
                     else { vm.switchSource(direction: -1) }
                     return
                 }
-                if abs(dy) > abs(dx) && abs(dy) > 36, sx <= w * 0.65 {
+                // 拖动中已跨阈值切换过，抬手不再补一次
+                if channelDragSwitchCount == 0, abs(dy) > 36 {
                     if dy < 0 { vm.nextChannel() } else { vm.prevChannel() }
                 }
             }
@@ -329,6 +369,40 @@ struct ContentView: View {
         numberInput = ""
         numberInputTask?.cancel()
         numberInputTask = nil
+    }
+}
+
+private struct NetworkSpeedBadge: View {
+    let speedKBps: Double
+    let isBuffering: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if isBuffering {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(.white)
+            } else {
+                Image(systemName: "arrow.down.circle.fill")
+                    .font(.system(size: 11))
+                    .foregroundColor(.white.opacity(0.85))
+            }
+            Text(text)
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .monospacedDigit()
+                .foregroundColor(.white)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color.black.opacity(0.55))
+        .clipShape(Capsule())
+        .overlay(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 0.5))
+    }
+
+    private var text: String {
+        if speedKBps >= 1024 { return String(format: "%.1f MB/s", speedKBps / 1024) }
+        if speedKBps > 0 { return String(format: "%.0f KB/s", speedKBps) }
+        return "--"
     }
 }
 
