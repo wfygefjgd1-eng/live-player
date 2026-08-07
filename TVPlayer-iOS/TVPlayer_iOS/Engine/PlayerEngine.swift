@@ -108,14 +108,6 @@ final class PlayerEngine: ObservableObject {
     @Published private(set) var shouldShowDiagnostics = false
     @Published private(set) var activeEngineName = "系统 AVPlayer"
 
-    /// 是否正在缓冲（左上角网速标识转圈）
-    var isBuffering: Bool {
-        switch diagnostics.timeControlStatus {
-        case "缓冲中", "正在打开", "等待": return true
-        default: return diagnostics.isBufferEmpty
-        }
-    }
-
     var diagnosticsSummary: String {
         let observed = diagnostics.observedBitrate > 0 ? String(format: "%.2f Mbps", diagnostics.observedBitrate / 1_000_000) : "未知"
         let averageVideo = diagnostics.averageVideoBitrate > 0

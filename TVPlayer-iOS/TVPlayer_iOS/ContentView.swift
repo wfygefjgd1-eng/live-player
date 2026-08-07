@@ -11,9 +11,6 @@ struct ContentView: View {
     @State private var numberInput = ""
     @State private var numberInputTask: Task<Void, Never>?
     @State private var singleTapTask: Task<Void, Never>?
-    /// 拖动换台：累计纵向位移，每跨 44pt 立即切一台（跟手）
-    @State private var channelDragAccum: CGFloat = 0
-    @State private var channelDragSwitchCount = 0
 
     var body: some View {
         ZStack {
@@ -160,15 +157,12 @@ struct ContentView: View {
                 }
                 .allowsHitTesting(false)
 
-                // 左上角常驻实时网速：缓冲时自动转圈
+                // 左上角常驻实时网速
                 VStack {
                     HStack {
-                        NetworkSpeedBadge(
-                            speedKBps: vm.player.observedSpeedKBps,
-                            isBuffering: vm.player.isBuffering
-                        )
-                        .padding(.top, top + 4)
-                        .padding(.leading, max(geo.safeAreaInsets.leading, 12) + 4)
+                        NetworkSpeedBadge(speedKBps: vm.player.observedSpeedKBps)
+                            .padding(.top, top + 4)
+                            .padding(.leading, max(geo.safeAreaInsets.leading, 12) + 4)
                         Spacer(minLength: 0)
                     }
                     Spacer(minLength: 0)
@@ -249,25 +243,8 @@ struct ContentView: View {
                     }
                     return
                 }
-                guard abs(dy) > abs(dx) else { return }
-                // 拖动换台：每跨 44pt 立即切换一台，跨阈值持续跟手
-                channelDragAccum += dy
-                while channelDragAccum >= 44 {
-                    channelDragAccum -= 44
-                    channelDragSwitchCount += 1
-                    vm.channelDragSwitch(delta: 1)
-                }
-                while channelDragAccum <= -44 {
-                    channelDragAccum += 44
-                    channelDragSwitchCount += 1
-                    vm.channelDragSwitch(delta: -1)
-                }
             }
             .onEnded { value in
-                defer {
-                    channelDragAccum = 0
-                    channelDragSwitchCount = 0
-                }
                 guard !vm.panelVisible else { return }
                 let w = max(UIScreen.main.bounds.width, UIScreen.main.bounds.height, 1)
                 let sx = value.startLocation.x
@@ -283,8 +260,8 @@ struct ContentView: View {
                     else { vm.switchSource(direction: -1) }
                     return
                 }
-                // 拖动中已跨阈值切换过，抬手不再补一次
-                if channelDragSwitchCount == 0, abs(dy) > 36 {
+                if abs(dy) > abs(dx) && abs(dy) > 36, sx <= w * 0.65 {
+                    // 从下往上滑（dy<0）= 下一频道（1→2），从上往下滑 = 上一频道
                     if dy < 0 { vm.nextChannel() } else { vm.prevChannel() }
                 }
             }
@@ -374,19 +351,12 @@ struct ContentView: View {
 
 private struct NetworkSpeedBadge: View {
     let speedKBps: Double
-    let isBuffering: Bool
 
     var body: some View {
         HStack(spacing: 6) {
-            if isBuffering {
-                ProgressView()
-                    .controlSize(.small)
-                    .tint(.white)
-            } else {
-                Image(systemName: "arrow.down.circle.fill")
-                    .font(.system(size: 11))
-                    .foregroundColor(.white.opacity(0.85))
-            }
+            Image(systemName: "arrow.down.circle.fill")
+                .font(.system(size: 11))
+                .foregroundColor(.white.opacity(0.85))
             Text(text)
                 .font(.system(size: 12, weight: .semibold, design: .monospaced))
                 .monospacedDigit()
