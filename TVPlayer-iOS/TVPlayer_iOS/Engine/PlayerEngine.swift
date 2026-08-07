@@ -99,6 +99,10 @@ final class PlayerEngine: ObservableObject {
     private var consecutiveBufferSeconds: Double = 0
     private var lowSpeedReported = false
 
+    /// EMA-smoothed observed bitrate (bps) for stable UI speed display
+    private var smoothedObservedBitrate: Double = 0
+    private let smoothingAlpha: Double = 0.3
+
     @Published var isReady = false
     @Published var isPlaying = false
     /// 最近采样网速 KB/s（供 UI/调试）
@@ -497,6 +501,8 @@ final class PlayerEngine: ObservableObject {
         shouldShowDiagnostics = false
         stallWatchEnabled = false
         failureRecorded = false
+        smoothedObservedBitrate = 0
+        observedSpeedKBps = 0
     }
 
     var volume: Float {
@@ -660,12 +666,16 @@ final class PlayerEngine: ObservableObject {
     }
 
     private func refreshDiagnostics(reason: String?) {
-        if activeBackend == .mpv {
+if activeBackend == .mpv {
             let sample = mpvEngine.diagnosticsSample()
-            observedSpeedKBps = sample.observedBitrate > 0
-                ? sample.observedBitrate / 8 / 1024 : 0
+            let rawKBps = sample.observedBitrate > 0 ? sample.observedBitrate / 8 / 1024 : 0
+            if sample.observedBitrate > 0 {
+                smoothedObservedBitrate = smoothedObservedBitrate * (1 - smoothingAlpha) + sample.observedBitrate * smoothingAlpha
+            }
+            let smoothedKBps = smoothedObservedBitrate / 8 / 1024
+            observedSpeedKBps = max(rawKBps, smoothedKBps)
             diagnostics = PlaybackDiagnostics(
-                observedBitrate: sample.observedBitrate,
+                observedBitrate: smoothedObservedBitrate,
                 averageVideoBitrate: sample.averageVideoBitrate,
                 currentVideoFrameRate: sample.outputFrameRate,
                 nominalVideoFrameRate: sample.nominalFrameRate,
@@ -681,10 +691,7 @@ final class PlayerEngine: ObservableObject {
                 isBufferEmpty: false,
                 playbackClockSeconds: sample.playbackClockSeconds,
                 engineName: activeEngineName,
-                reason: reason ?? diagnostics.reason,
-                cacheSpeedKBps: sample.cacheSpeedKBps,
-                hwdecActive: sample.hwdecActive,
-                playbackAborted: sample.playbackAborted
+                reason: reason ?? diagnostics.reason
             )
         }
     }
@@ -720,9 +727,14 @@ final class PlayerEngine: ObservableObject {
         let state = avStateText()
         let videoTrack = item.tracks.first { $0.assetTrack?.mediaType == .video }?.assetTrack
 
-        observedSpeedKBps = observed > 0 ? observed / 8 / 1024 : 0
+        if observed > 0 {
+            smoothedObservedBitrate = smoothedObservedBitrate * (1 - smoothingAlpha) + Double(observed) * smoothingAlpha
+        }
+        let smoothedKBps = smoothedObservedBitrate / 8 / 1024
+        observedSpeedKBps = max(observed > 0 ? observed / 8 / 1024 : 0, smoothedKBps)
+        let displaySpeedKBps = max(observedSpeedKBps, smoothedObservedBitrate / 8 / 1024)
         diagnostics = PlaybackDiagnostics(
-            observedBitrate: Double(observed),
+            observedBitrate: smoothedObservedBitrate,
             averageVideoBitrate: Double(bitrate),
             currentVideoFrameRate: 0,
             nominalVideoFrameRate: videoTrack.map { Double($0.nominalFrameRate) } ?? 0,

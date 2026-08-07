@@ -353,20 +353,15 @@ private struct NetworkSpeedBadge: View {
     let speedKBps: Double
 
     var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "arrow.down.circle.fill")
-                .font(.system(size: 11))
-                .foregroundColor(.white.opacity(0.85))
-            Text(text)
-                .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                .monospacedDigit()
-                .foregroundColor(.white)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(Color.black.opacity(0.55))
-        .clipShape(Capsule())
-        .overlay(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 0.5))
+        Text(text)
+            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+            .monospacedDigit()
+            .foregroundColor(.white)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Color.black.opacity(0.55))
+            .clipShape(Capsule())
+            .overlay(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 0.5))
     }
 
     private var text: String {
