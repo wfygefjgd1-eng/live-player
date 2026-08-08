@@ -37,6 +37,30 @@ struct ContentView: View {
             floatingChrome()
                 .zIndex(5)
 
+            // 自动切换提示弹窗（唯一）：独立顶层，弹窗可见时拦截底层 tap（暂停让路）
+            if let prompt = vm.autoSwitchPrompt {
+                // 全屏透明拦击层：接住所有 tap（含按钮周围空白），
+                // 高优先级保证底层的「单击暂停」手势在此绕路，不误触暂停
+                Color.clear
+                    .contentShape(Rectangle())
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .ignoresSafeArea()
+                    .highPriorityGesture(
+                        TapGesture().onEnded {
+                            // 空操作：吞掉 tap，避免触发暂停；按钮自身的点击仍由按钮接收
+                        }
+                    )
+                    .zIndex(8)
+
+                AutoSwitchPromptView(
+                    message: prompt.message,
+                    kind: prompt.kind,
+                    onClose: { vm.handleCloseAutoSwitch() },
+                    onEnable: { vm.handleEnableAutoSwitch() }
+                )
+                .zIndex(9)
+            }
+
             if vm.playbackPaused && !vm.panelVisible {
                 Button {
                     vm.resume()
@@ -209,15 +233,8 @@ struct ContentView: View {
                     .allowsHitTesting(false)
                 }
 
-                // 自动切换提示弹窗（唯一）：关闭自动切换 / 30s 无声画后引导开启
-                if let prompt = vm.autoSwitchPrompt {
-                    AutoSwitchPromptView(
-                        message: prompt.message,
-                        kind: prompt.kind,
-                        onClose: { vm.handleCloseAutoSwitch() },
-                        onEnable: { vm.handleEnableAutoSwitch() }
-                    )
-                }
+                // 自动切换提示弹窗已移到 body 顶层（见 ContentView body），与此处分离，
+                // 避免被 floatingChrome 的 allowsHitTesting(false) 吞掉点击。
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
