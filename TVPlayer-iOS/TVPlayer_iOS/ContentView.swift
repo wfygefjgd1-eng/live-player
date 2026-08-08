@@ -162,19 +162,21 @@ struct ContentView: View {
                 // 注意：必须让徽章直接 @ObservedObject 观察 PlayerEngine，
                 // 否则它只会在 vm 的 @Published 变化（OSD/切台等）时被偶然重绘，
                 // 无法在每个 0.5s 采样点及时刷新 —— 这就是旧版网速"不实时"的根源。
-                VStack {
+                VStack(alignment: .leading, spacing: 6) {
                     HStack {
                         NetworkSpeedBadge(player: vm.player)
                         Spacer(minLength: 0)
                     }
-                    .padding(.top, top + 4)
-                    .padding(.leading, max(geo.safeAreaInsets.leading, 12) + 4)
+                    // 切台中：左上角小徽标（转圈 + 网速 + 在加载），紧随网速下方
+                    HStack {
+                        SwitchingOverlay(player: vm.player)
+                        Spacer(minLength: 0)
+                    }
                     Spacer(minLength: 0)
                 }
-                .allowsHitTesting(false)
-
-                // 切台中：屏幕中央转圈 + 实时网速（同样直接观察 player）
-                SwitchingOverlay(player: vm.player)
+                .padding(.top, top + 4)
+                .padding(.leading, max(geo.safeAreaInsets.leading, 12) + 4)
+                .allowsHitTesting(false)      // 移除居中大块 SwitchingOverlay
 
                 if vm.showDiagnosticsOverlay || vm.player.shouldShowDiagnostics {
                     VStack {
@@ -228,28 +230,29 @@ struct ContentView: View {
         return "--"
     }
 
-    /// 切台中转圈 + 实时网速：直接 @ObservedObject 观察 player，采样点即时刷新
+    /// 切台中：左上角小徽标（小转圈 + 实时网速）。不再居中大块，避免挡住画面。
     private struct SwitchingOverlay: View {
         @ObservedObject var player: PlayerEngine
 
         var body: some View {
             if player.isSwitching {
-                VStack(spacing: 10) {
+                HStack(spacing: 8) {
                     ProgressView()
-                        .controlSize(.large)
+                        .controlSize(.small)
                         .tint(.white)
                     Text(speedText(player.observedSpeedKBps))
-                        .font(.system(size: 22, weight: .bold, design: .monospaced))
+                        .font(.system(size: 12, weight: .bold, design: .monospaced))
                         .monospacedDigit()
                         .foregroundColor(.white)
-                    Text("切换中")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(.white.opacity(0.7))
+                    Text("在加载")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.white.opacity(0.8))
                 }
-                .padding(.horizontal, 28)
-                .padding(.vertical, 20)
-                .background(Color.black.opacity(0.65))
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(Color.black.opacity(0.6))
+                .clipShape(Capsule())
+                .overlay(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 0.5))
                 .allowsHitTesting(false)
             }
         }
