@@ -20,8 +20,8 @@ private let INDICATOR_MS: UInt64 = 1_200_000_000
 private let AUTO_SWITCH_COOLDOWN_NS: UInt64 = 2_000_000_000
 /// 无声判定冷却（秒级防抖）
 private let SILENT_AUDIO_GRACE_NS: UInt64 = 10_000_000_000
-/// 连续自动 hop 频道上限（线都试完才 hop）；连续多台失败说明可能是用户网络问题
-private let AUTO_RECOVER_MAX_CHANNELS = 5
+/// 连续自动 hop 频道上限（线都试完才 hop）
+private let AUTO_RECOVER_MAX_CHANNELS = 15
 private let BLACKLIST_REFRESH_NS: UInt64 = 60_000_000_000
 
 // 精选列表 JSON（Bundle 快速启动 / 旁路刷新），勿当 m3u 源重复塞进 PRESET
@@ -90,13 +90,6 @@ final class PlayerViewModel: ObservableObject {
     var sourceUrls: [String] = []
     var activeSourceUrl = DEFAULT_SOURCE_URL
     private var autoSwitchState: AutoSwitchState = .idle
-    /// 进入 .switching 的时刻：若无下一条可播线路或 playLineLoop 被取消/退出，
-    /// 不会自然重置 .switching，后续 autoSwitchLine 会被吞掉（永久死锁）。
-    /// 超时后强制回 .idle，保证状态机始终自愈。
-    private var switchingStartedAt: Date = .distantPast
-    /// 进入 .switching 后若迟迟未择出下一条（被取消 / 无候选），8 秒后强制复位；
-    /// 多坏线场景下 playLineLoop 内部会逐条推进，实际占用很短，不构成误伤。
-    private static let autoSwitchMaxDuration: TimeInterval = 8.0
     private var pendingAutoSwitchReminder: String?
     private var started = false
     private var triedLineIndices = Set<Int>()
@@ -390,6 +383,7 @@ final class PlayerViewModel: ObservableObject {
     func persistSources() {
         storage.saveSourceUrls(sourceUrls)
         storage.saveSelectedSourceUrl(activeSourceUrl)
+        storage.saveCustomSourceUrl(activeSourceUrl)
     }
 
     func selectSource(_ url: String) {
@@ -836,16 +830,8 @@ final class PlayerViewModel: ObservableObject {
     private func playLineLoop(channel ch: Channel, generation gen: Int, showOSD: Bool) async {
         var guardLoops = 0
         while guardLoops < ch.sourceCount {
-            guard !Task.isCancelled, playGeneration == gen else {
-                // 本事务被新 play 取消：释放自动切换锁，避免 .switching 残留导致
-                // 后续自动换线永久被吞（与 autoSwitchLine 的超时自愈互为兜底）。
-                if autoSwitchState == .switching { autoSwitchState = .idle }
-                return
-            }
-            guard currentChannel?.key == ch.key else {
-                if autoSwitchState == .switching { autoSwitchState = .idle }
-                return
-            }
+            guard !Task.isCancelled, playGeneration == gen else { return }
+            guard currentChannel?.key == ch.key else { return }
             guardLoops += 1
 
             if currentSourceIndex < 0 || currentSourceIndex >= ch.urls.count {
@@ -880,16 +866,8 @@ final class PlayerViewModel: ObservableObject {
 
             if lineTimeoutEnabled {
                 let result = await LineSpeedTester.shared.quickPreflight(raw, timeout: 2.2)
-                guard !Task.isCancelled, playGeneration == gen else {
-                    // preflight 期间被新 play 取消：同样释放自动切换锁，
-                    // 否则 .switching 残留会让后续自动换线永久失效。
-                    if autoSwitchState == .switching { autoSwitchState = .idle }
-                    return
-                }
-                guard currentChannel?.key == ch.key else {
-                    if autoSwitchState == .switching { autoSwitchState = .idle }
-                    return
-                }
+                guard !Task.isCancelled, playGeneration == gen else { return }
+                guard currentChannel?.key == ch.key else { return }
                 if lineTimeoutEnabled && result == .hardFail {
                     triedLineIndices.insert(idx)
                     LineQualityStore.shared.recordFailure(url: raw)
@@ -987,25 +965,12 @@ final class PlayerViewModel: ObservableObject {
     /// 自动切线：只响应确认坏线事件；下一条统一走 playLineLoop（预检+黑名单）
     private func autoSwitchLine(hint: String, reason: FailReason) {
         guard lineTimeoutEnabled else { return }
-        // 网络可用性闸：用户断网/无网络时绝不自动切频道——再切也是白切，
-        // 还遮挡了真正的病因。此时给出「网络不可用」提示并停在原地。
-        if !NetworkMonitor.shared.isSatisfied {
-            showIndicator("网络不可用，请检查连接")
-            return
-        }
         if panelVisible { return }
         guard let ch = currentChannel else {
             showIndicator(hint)
             return
         }
         if reason == .noAudio { return }
-        // 多信号复核（优化 1a，减少误杀）：
-        // .noData 事件（起播超时 / 低速无数据）触发换线前，先看引擎实时信号。
-        // 若此刻声画都在流动、网络在动（isAudioVideoFlowing），说明并非真死，
-        // 多为缓冲抖动或采样滞后，放弃这次换线，避免把正在播的台误切走。
-        if reason == .noData, player.isReady, player.isAudioVideoFlowing() {
-            return
-        }
         if autoSwitchState == .cooldown, !autoAdvanceOnExhaustion { return }
 
         if autoSwitchState == .cooldown {
@@ -1019,18 +984,9 @@ final class PlayerViewModel: ObservableObject {
         }
         // AVPlayer may report status, error-log and end-time failures for one item.
         // Keep one automatic switch transaction in flight until its preflight ends.
-        if autoSwitchState == .switching {
-            // 自愈：若上一步切换的 preflight 被取消/playLineLoop 提前退出，
-            // .switching 不会被重置，自动换线会永久失效。超时即强制复位。
-            if Date().timeIntervalSince(switchingStartedAt) > Self.autoSwitchMaxDuration {
-                autoSwitchState = .idle
-            } else {
-                return
-            }
-        }
+        if autoSwitchState == .switching { return }
 
         autoSwitchState = .switching
-        switchingStartedAt = Date()
         playbackStable = false
 
         if autoBlacklistEnabled, currentSourceIndex >= 0, currentSourceIndex < ch.urls.count {
@@ -1047,11 +1003,7 @@ final class PlayerViewModel: ObservableObject {
                 if autoBlacklistEnabled, storage.isLineBlacklisted(cand) { continue }
                 guard let u = URL(string: cand),
                       let scheme = u.scheme?.lowercased(),
-                      scheme == "http" || scheme == "https" else {
-                    // 只与 playLineLoop 的协议白名单一致（http/https）。
-                    // rtmp/rtsp 虽可能在解析阶段被保留（M3UParserService 为过滤
-                    // 垃圾数据而放行），但当前播放管线（AVPlayer + MPVKit Vulkan）
-                    // 无法输出，直接在候选里视为不可用跳过。
+                      scheme == "http" || scheme == "https" || scheme == "rtmp" || scheme == "rtsp" else {
                     triedLineIndices.insert(nxt)
                     continue
                 }
@@ -1081,8 +1033,7 @@ final class PlayerViewModel: ObservableObject {
         }
         if autoRecoverChannelHops >= AUTO_RECOVER_MAX_CHANNELS {
             pendingAutoSwitchReminder = nil
-            // 连续多台失败：更可能是用户侧网络差而非源都坏，提示而非继续盲切
-            showIndicator("连续多台无法播放，请检查网络是否通畅")
+            showIndicator("连续多台无可用线路，请手动换台或换源")
             beginCooldown()
             return
         }

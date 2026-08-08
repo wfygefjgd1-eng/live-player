@@ -9,6 +9,7 @@ final class StorageService {
     private let kChannelsMeta = "channels_meta"       // 元数据（版本、数量、更新时间）
     private let kSourceUrls = "source_urls"
     private let kSelectedSource = "selected_source_url"
+    private let kCustomSource = "custom_source_url"
     private let kHiddenLines = "hidden_lines"
     private let kBlacklistedLines = "blacklisted_lines"  // 失败线路黑名单
     private let kFavorites = "favorites"
@@ -131,11 +132,29 @@ final class StorageService {
         }
     }
 
+    func saveCustomSourceUrl(_ url: String) {
+        queue.async(flags: .barrier) { [weak self] in
+            guard let self else { return }
+            self.defaults.set(url, forKey: self.kCustomSource)
+        }
+    }
+
     // MARK: - 隐藏线路
 
     func loadHiddenLines() -> Set<String> {
         queue.sync {
             Set(defaults.stringArray(forKey: kHiddenLines) ?? [])
+        }
+    }
+
+    /// 同步写入，保证随后 isLineHidden / applyRules 立刻可见
+    func hideLine(_ url: String) {
+        let clean = url.trimmingCharacters(in: .whitespaces)
+        guard !clean.isEmpty else { return }
+        queue.sync(flags: .barrier) {
+            var lines = Set(defaults.stringArray(forKey: kHiddenLines) ?? [])
+            lines.insert(clean)
+            defaults.set(Array(lines), forKey: kHiddenLines)
         }
     }
 
@@ -300,7 +319,7 @@ final class StorageService {
         queue.async(flags: .barrier) { [weak self] in
             guard let self else { return }
             for key in [self.kChannels, self.kChannelsMeta, self.kSourceUrls,
-                         self.kSelectedSource, self.kHiddenLines,
+                         self.kSelectedSource, self.kCustomSource, self.kHiddenLines,
                          self.kBlacklistedLines, self.kFavorites, self.kLastChannelKey,
                          self.kLastSourceIndex, self.kDataVersion, self.kLineTimeoutEnabled,
                          self.kAutoBlacklistEnabled, self.kAutoAdvanceOnExhaustion] {
