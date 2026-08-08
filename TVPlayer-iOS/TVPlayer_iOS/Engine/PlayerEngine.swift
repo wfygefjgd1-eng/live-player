@@ -41,11 +41,8 @@ final class PlayerEngine: ObservableObject {
         return mpvStartupTimeoutNs
     }
 
-    // 起播参数仍保留（bufferProfile 用于诊断展示）。
-    // initialBufferSeconds 是 AVPlayer preferredForwardBufferDuration：决定了等待多少
-    // 缓冲才出首帧。直播源无需等 6s（6s 是存片习惯值），降到 3s 画面更快。
-    // 3s 后系统会渐进填充。长分片源（18s）与稳态缓冲（24s）不受影响。
-    static let initialBufferSeconds: TimeInterval = 3
+    // 起播参数仍保留（bufferProfile 用于诊断展示）
+    static let initialBufferSeconds: TimeInterval = 6
     static let longSegmentBufferSeconds: TimeInterval = 18
 
     static var steadyBufferSeconds: TimeInterval {
@@ -291,12 +288,8 @@ final class PlayerEngine: ObservableObject {
         item.preferredForwardBufferDuration = Self.initialBufferSeconds
         item.preferredPeakBitRate = 0
         item.canUseNetworkResourcesForLiveStreamingWhilePaused = false
-        // 关键：直播首帧提速。automaticallyWaitsToMinimizeStalling = true 会让 AVPlayer
-        // 等到缓冲积攒到 preferredForwardBufferDuration 才出首帧（点播合理、直播拖慢）。
-        // 设为 false 后，一拿到首批数据（几百 ms）就立即开播——B站/YouTube 之所以
-        // "转两圈就能播"，正是这类即时起播策略。弱网下的缓冲由快速换线逻辑兜底，
-        // 首帧与流畅优先。
-        avPlayer.automaticallyWaitsToMinimizeStalling = false
+        // 等待视频在线可用，避免网络抖动时丢视频帧保音频 →「声音流畅、画面幻灯片」
+        avPlayer.automaticallyWaitsToMinimizeStalling = true
         avItem = item
 
         teardownAVObservers()
