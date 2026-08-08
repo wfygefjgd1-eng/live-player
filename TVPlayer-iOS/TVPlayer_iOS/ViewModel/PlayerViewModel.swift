@@ -7,13 +7,13 @@ import MediaPlayer
 // 拉取时 MirrorResolver 自动展开 jsDelivr / Pages / ghproxy / raw 镜像竞速。
 // 2026-08-08：默认源切换为当日精筛源（strict-quality 实测可达的 168 台快线）。
 let SOURCE_FILENAME = "validated-channels-2026-08-08.m3u"
-let DEFAULT_SOURCE_URL = "https://cdn.jsdelivr.net/gh/wfygefjgd/live-player@main/iptv-mirrors/\(SOURCE_FILENAME)"
+let DEFAULT_SOURCE_URL = "https://cdn.jsdelivr.net/gh/wfygefjgd1-eng/live-player@main/iptv-mirrors/\(SOURCE_FILENAME)"
 /// 与 DEFAULT 同内容；「加载最新」优先走 Pages/raw（更新更快，少受 jsDelivr 缓存影响）
 let LATEST_LINEUP_URLS: [String] = [
-    "https://wfygefjgd.github.io/live-player/iptv-mirrors/\(SOURCE_FILENAME)",
-    "https://raw.githubusercontent.com/wfygefjgd/live-player/main/iptv-mirrors/\(SOURCE_FILENAME)",
-    "https://cdn.jsdelivr.net/gh/wfygefjgd/live-player@main/iptv-mirrors/\(SOURCE_FILENAME)",
-    "https://fastly.jsdelivr.net/gh/wfygefjgd/live-player@main/iptv-mirrors/\(SOURCE_FILENAME)",
+    "https://wfygefjgd1-eng.github.io/live-player/iptv-mirrors/\(SOURCE_FILENAME)",
+    "https://raw.githubusercontent.com/wfygefjgd1-eng/live-player/main/iptv-mirrors/\(SOURCE_FILENAME)",
+    "https://cdn.jsdelivr.net/gh/wfygefjgd1-eng/live-player@main/iptv-mirrors/\(SOURCE_FILENAME)",
+    "https://fastly.jsdelivr.net/gh/wfygefjgd1-eng/live-player@main/iptv-mirrors/\(SOURCE_FILENAME)",
 ]
 
 private let CHANNEL_OSD_MS: UInt64 = 2_500_000_000
@@ -28,13 +28,13 @@ private let BLACKLIST_REFRESH_NS: UInt64 = 60_000_000_000
 
 // 精选列表 JSON（Bundle 快速启动 / 旁路刷新），勿当 m3u 源重复塞进 PRESET
 let VALIDATED_M3U_MIRROR =
-    "https://wfygefjgd.github.io/live-player/iptv-mirrors/\(SOURCE_FILENAME)"
+    "https://wfygefjgd1-eng.github.io/live-player/iptv-mirrors/\(SOURCE_FILENAME)"
 let VALIDATED_M3U_CDN_MIRROR =
-    "https://cdn.jsdelivr.net/gh/wfygefjgd/live-player@main/iptv-mirrors/\(SOURCE_FILENAME)"
+    "https://cdn.jsdelivr.net/gh/wfygefjgd1-eng/live-player@main/iptv-mirrors/\(SOURCE_FILENAME)"
 let VALIDATED_M3U_FASTLY_MIRROR =
-    "https://fastly.jsdelivr.net/gh/wfygefjgd/live-player@main/iptv-mirrors/\(SOURCE_FILENAME)"
+    "https://fastly.jsdelivr.net/gh/wfygefjgd1-eng/live-player@main/iptv-mirrors/\(SOURCE_FILENAME)"
 let VALIDATED_M3U_RAW =
-    "https://raw.githubusercontent.com/wfygefjgd/live-player/main/iptv-mirrors/\(SOURCE_FILENAME)"
+    "https://raw.githubusercontent.com/wfygefjgd1-eng/live-player/main/iptv-mirrors/\(SOURCE_FILENAME)"
 
 // M3U 预置源（GitHub 系地址拉取时自动扩镜像，见 MirrorResolver）
 let PRESET_SOURCES: [(name: String, url: String)] = [
@@ -45,9 +45,9 @@ let PRESET_SOURCES: [(name: String, url: String)] = [
     ("Guovin 自动筛选源", "https://raw.githubusercontent.com/Guovin/iptv-api/gd/output/result.m3u"),
     ("vbskycn 双栈源", "https://raw.githubusercontent.com/vbskycn/iptv/master/tv/iptv4.m3u"),
     ("fanmingming IPv6 源", "https://raw.githubusercontent.com/fanmingming/live/main/tv/m3u/ipv6.m3u"),
-    ("BurningC4 中国源", "https://wfygefjgd.github.io/live-player/iptv-mirrors/burningc4-chinese-iptv.m3u"),
-    ("zbefine 2026 维护源", "https://wfygefjgd.github.io/live-player/iptv-mirrors/zbefine-iptv.m3u"),
-    ("suxuang IPv6 源", "https://wfygefjgd.github.io/live-player/iptv-mirrors/suxuang-myiptv.m3u"),
+    ("BurningC4 中国源", "https://wfygefjgd1-eng.github.io/live-player/iptv-mirrors/burningc4-chinese-iptv.m3u"),
+    ("zbefine 2026 维护源", "https://wfygefjgd1-eng.github.io/live-player/iptv-mirrors/zbefine-iptv.m3u"),
+    ("suxuang IPv6 源", "https://wfygefjgd1-eng.github.io/live-player/iptv-mirrors/suxuang-myiptv.m3u"),
 ]
 
 private enum AutoSwitchState {
@@ -365,7 +365,7 @@ final class PlayerViewModel: ObservableObject {
         }
         sourceUrls = urls.keys
         let selected = storage.loadSelectedSourceUrl().trimmingCharacters(in: .whitespaces)
-        let legacyValidatedPages = "https://wfygefjgd.github.io/live-player/iptv-mirrors/validated-channels-2026-08-08.m3u"
+        let legacyValidatedPages = "https://wfygefjgd1-eng.github.io/live-player/iptv-mirrors/validated-channels-2026-08-08.m3u"
         let legacyRawDefault = "https://raw.githubusercontent.com/Guovin/iptv-api/gd/output/result.m3u"
         if !selected.isEmpty,
            selected != legacyValidatedPages,
