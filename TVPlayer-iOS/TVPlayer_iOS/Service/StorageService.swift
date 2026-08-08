@@ -19,6 +19,7 @@ final class StorageService {
     private let kLineTimeoutEnabled = "line_timeout_enabled"
     private let kAutoBlacklistEnabled = "auto_blacklist_enabled"
     private let kAutoAdvanceOnExhaustion = "auto_advance_on_exhaustion"
+    private let kBackgroundPlaybackEnabled = "background_playback_enabled"
     private let autoBlacklistTTL: TimeInterval = 15 * 60
 
     private let currentDataVersion = 1
@@ -262,6 +263,25 @@ final class StorageService {
         }
     }
 
+    // MARK: - 后台播放
+
+    func saveBackgroundPlaybackEnabled(_ enabled: Bool) {
+        queue.async(flags: .barrier) { [weak self] in
+            guard let self else { return }
+            self.defaults.set(enabled, forKey: self.kBackgroundPlaybackEnabled)
+        }
+    }
+
+    func loadBackgroundPlaybackEnabled() -> Bool {
+        queue.sync {
+            // 默认关闭后台播放
+            if defaults.object(forKey: kBackgroundPlaybackEnabled) == nil {
+                return false
+            }
+            return defaults.bool(forKey: kBackgroundPlaybackEnabled)
+        }
+    }
+
     // MARK: - 收藏
 
     func loadFavorites() -> Set<String> {
@@ -322,7 +342,8 @@ final class StorageService {
                          self.kSelectedSource, self.kCustomSource, self.kHiddenLines,
                          self.kBlacklistedLines, self.kFavorites, self.kLastChannelKey,
                          self.kLastSourceIndex, self.kDataVersion, self.kLineTimeoutEnabled,
-                         self.kAutoBlacklistEnabled, self.kAutoAdvanceOnExhaustion] {
+                         self.kAutoBlacklistEnabled, self.kAutoAdvanceOnExhaustion,
+                         self.kBackgroundPlaybackEnabled] {
                 self.defaults.removeObject(forKey: key)
             }
         }

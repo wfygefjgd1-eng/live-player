@@ -88,6 +88,22 @@ struct SourceManagementSheet: View {
                             }
                         }
 
+                        Toggle(isOn: Binding(
+                            get: { vm.backgroundPlaybackEnabled },
+                            set: { vm.setBackgroundPlaybackEnabled($0) }
+                        )) {
+                            HStack {
+                                Image(systemName: "play.tv")
+                                    .foregroundColor(.purple)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("允许后台播放")
+                                    Text("关闭后 App 退到后台将暂停；开启后切后台继续播放")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                        }
+
                         if vm.autoBlacklistEnabled {
                             Button {
                                 vm.clearBlacklist()

@@ -501,23 +501,42 @@ final class PlayerEngine: ObservableObject {
     }
 
     /// 当前是否有「声画在流动」。（Viewer 用于自动换线前的复核：若仍正常播放则取消误切）
-    /// - AVPlayer：正在播放 + 缓冲充足 + 视频尺寸已就绪
-    /// - mpv：已出画（尺寸>0）+ 未暂停缓存（core 非 idle）
+    /// 判定放宽：不苛求「此刻恰好 playing」——瞬时抖动下 timeControlStatus 会短暂读成
+    /// 缓冲中，但画面/声音其实还在。只要「缓冲有数据 或 网速在流动」+ 画面尺寸就绪即可。
+    /// - AVPlayer：缓冲充足 或 网速>0，且尺寸就绪；状态非暂停即可
+    /// - mpv：已出画 + 未 paused-for-cache（缓存有数据）
     func isAudioVideoFlowing() -> Bool {
         guard isReady else { return false }
         if activeBackend == .mpv {
             let sample = mpvEngine.diagnosticsSample()
             return sample.hasVideoOutput
                 && sample.width > 0 && sample.height > 0
-                && sample.stateText == "播放中"
+                && !isMPVStalled
         } else {
             guard let item = avItem else { return false }
             let size = item.presentationSize
-            return avStateText() == "播放中"
-                && item.isPlaybackLikelyToKeepUp
-                && !item.isPlaybackBufferEmpty
-                && size.width > 1 && size.height > 1
+            let state = avStateText()
+            // 画面尺寸就绪 + 非暂停（缓冲中/播放中皆可）
+            guard size.width > 1, size.height > 1, state != "暂停" else { return false }
+            // 缓冲有数据，或网速在流动（网络在灌 = 源活着，即使瞬时缓冲也视为流动）
+            let bufferedOK = !item.isPlaybackBufferEmpty && item.isPlaybackLikelyToKeepUp
+            let networkOK = observedSpeedKBps > 0
+            return bufferedOK || networkOK
         }
+    }
+
+    /// mpv 是否陷入无缓存停滞（paused-for-cache 且无网络流动）
+    private var isMPVStalled: Bool {
+        let sample = mpvEngine.diagnosticsSample()
+        return sample.stateText == "缓冲中"
+            && sample.cacheSpeedKBps <= 0
+            && observedSpeedKBps <= 0
+    }
+
+    /// 网速是否持续达标（≥ threshold KB/s）——「源还活着」的硬证据。
+    /// 画面/声音可能瞬时抖动，但正在下载的字节数不会说谎：有持续网速=源在传=不该切。
+    func isNetworkFlowing(aboveKBps threshold: Double) -> Bool {
+        observedSpeedKBps >= threshold
     }
 
     /// 30 秒无声无画兜底：启动一个后台看门狗，若 30s 内声画一直未流动则回调。

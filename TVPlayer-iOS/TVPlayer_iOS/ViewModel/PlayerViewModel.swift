@@ -93,6 +93,8 @@ final class PlayerViewModel: ObservableObject {
     @Published var autoBlacklistEnabled: Bool = false
     /// 当前频道没有可用线路后是否继续自动切台（默认开启，保持历史行为）
     @Published var autoAdvanceOnExhaustion: Bool = true
+    /// 是否允许后台播放（默认关闭）。关闭时进入后台自动暂停，回前台恢复。
+    @Published var backgroundPlaybackEnabled: Bool = false
     /// 用户主动暂停状态，供画面层显示恢复按钮。
     @Published private(set) var playbackPaused = false
     private let fusionEngine = SmartFusionEngine.shared
@@ -143,6 +145,7 @@ final class PlayerViewModel: ObservableObject {
         restoreLineTimeoutEnabled()
         restoreAutoBlacklistEnabled()
         restoreAutoAdvanceOnExhaustion()
+        restoreBackgroundPlaybackEnabled()
 
         player.onReady = { [weak self] in self?.onPlayerReady() }
         player.onError = { [weak self] in self?.onPlayerError() }
@@ -153,6 +156,18 @@ final class PlayerViewModel: ObservableObject {
         NetworkMonitor.shared.onSatisfied = { [weak self] in self?.onNetworkBecameAvailable() }
         NetworkMonitor.shared.onConnectionTypeChanged = { [weak self] type in
             self?.onConnectionTypeChanged(type)
+        }
+
+        // 后台/前台：后台播放关闭时进入后台暂停、回前台恢复
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.onAppEnteredBackground()
+        }
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.onAppWillEnterForeground()
         }
 
         restoreSources()
@@ -1047,13 +1062,24 @@ final class PlayerViewModel: ObservableObject {
         // Keep one automatic switch transaction in flight until its preflight ends.
         if autoSwitchState == .switching { return }
 
-        // 误切复核：画面/声音仍在流动时，不因软信号（超时/低速/AVPlayer误报）误切。
-        // 真失败时引擎会离开「播放中」，isAudioVideoFlowing() 返回 false → 放行切换；
-        // 仅当「其实还在播」（item 误报 failed / 瞬时抖动）时才被拦下，避免误杀。
-        // hardFail 也复核：AVPlayer 对某些直播源会瞬时误报 failed，画面明明在动。
-        if player.isReady, player.isAudioVideoFlowing() {
-            showIndicator("画面/声音正常，已取消自动切换")
-            return
+        // 误切复核（两层）：
+        // 1) 声画在流动（放宽判定）→ 不切（hardFail 和 noData 都适用：画面动了别切）
+        // 2) 网速 ≥ 200KB/s → 不切（仅 .noData/低速类。源在传数据的硬证据）
+        //    画面和声音都出来了，网速必已超 200KB → 线路是活的，不该切。
+        //    真失败(hardFail)时下一条已真正停，声画检查会放行；网速暂不参与 hardFail
+        //    以免「快网 + 源真 404」时被残存缓冲误挡。
+        if player.isReady {
+            if player.isAudioVideoFlowing() {
+                showIndicator("画面/声音正常，已取消自动切换")
+                return
+            }
+            if reason != .hardFail {
+                let speedGateKBps = 200.0
+                if player.isNetworkFlowing(aboveKBps: speedGateKBps) {
+                    showIndicator("网速正常，已取消自动切换")
+                    return
+                }
+            }
         }
 
         autoSwitchState = .switching
@@ -1342,6 +1368,43 @@ final class PlayerViewModel: ObservableObject {
 
     func restoreAutoAdvanceOnExhaustion() {
         autoAdvanceOnExhaustion = storage.loadAutoAdvanceOnExhaustion()
+    }
+
+    // MARK: - 后台播放
+
+    /// 设置后台播放开关。关闭时若正在后台则立即暂停；开启时后台继续播。
+    func setBackgroundPlaybackEnabled(_ enabled: Bool) {
+        backgroundPlaybackEnabled = enabled
+        storage.saveBackgroundPlaybackEnabled(enabled)
+        showIndicator(enabled ? "已开启后台播放" : "已关闭后台播放（后台将暂停）")
+        if enabled {
+            UIApplication.shared.isIdleTimerDisabled = true
+        }
+    }
+
+    func restoreBackgroundPlaybackEnabled() {
+        backgroundPlaybackEnabled = storage.loadBackgroundPlaybackEnabled()
+    }
+
+    /// App 进入后台：后台播放关闭时暂停，避免声音在后台继续；开启则保持播放。
+    func onAppEnteredBackground() {
+        guard started, player.isPlaying else { return }
+        if !backgroundPlaybackEnabled {
+            player.pause()
+            playbackPaused = true
+            updateNowPlaying()
+        }
+    }
+
+    func onAppWillEnterForeground() {
+        // 后台播放关闭导致暂停的，回前台后恢复播放
+        guard started, backgroundPlaybackEnabled == false,
+              playbackPaused, player.hasCurrentMedia else { return }
+        if !userPaused {
+            player.resume()
+            playbackPaused = false
+            updateNowPlaying()
+        }
     }
 
     /// 手动清空黑名单
