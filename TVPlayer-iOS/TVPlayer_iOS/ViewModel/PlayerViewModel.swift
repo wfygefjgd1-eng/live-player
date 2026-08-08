@@ -247,20 +247,9 @@ final class PlayerViewModel: ObservableObject {
         WindowVideoSurface.shared.rebindPlayer()
         guard started else { return }
 
-        // startup() already performs a network refresh. Every later foreground
-        // entry force-reloads the currently selected source, ignoring stale lists.
-        // 正在稳定播放时不打断画面：仅静默刷新线路数据，出画后再由
-        // onChannelsLoaded(silent:) 决定是否用最新线路重新起播。
-        let now = Date()
-        if now.timeIntervalSince(lastEntrySourceReloadAt) >= 2 {
-            lastEntrySourceReloadAt = now
-            if player.isReady && !channels.isEmpty {
-                loadChannels(force: true, silent: true, preferActiveOnly: true)
-            } else {
-                reloadActiveSource(entryRefresh: true)
-            }
-            return
-        }
+        // 前台恢复**不重载来源**：只有冷启动（完全退出再打开，startup() 里
+        // applyQuickStartChannels + loadChannels）才重新拉取来源。后台回来只恢复
+        // 画面与播放，避免每次回前台都刷一遍 m3u、让用户感觉"又要加载"。
         if channels.isEmpty {
             retryLoadSources()
             return
@@ -828,12 +817,18 @@ final class PlayerViewModel: ObservableObject {
         playTask?.cancel()
         playTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            await self.playLineLoop(channel: ch, generation: gen, showOSD: showOSD)
+            // resetTried 的首候选是用户历史质量最好的线，直接起播跳过预检（画面更快），
+            // 预检仅对切换/后续线保留。
+            await self.playLineLoop(channel: ch, generation: gen, showOSD: showOSD,
+                                    skipFirstPreflight: resetTried)
         }
     }
 
     /// 统一起播：仅 hardFail 预检跳过；unknown/ok 交给系统播放器。
-    private func playLineLoop(channel ch: Channel, generation gen: Int, showOSD: Bool) async {
+    /// skipFirstPreflight 为 true 时，首个候选（用户历史质量最好线）直接起播，
+    /// 不再先等 quickPreflight——省掉最多 2.2s 预检阻塞，画面更快。
+    private func playLineLoop(channel ch: Channel, generation gen: Int, showOSD: Bool,
+                              skipFirstPreflight: Bool = false) async {
         var guardLoops = 0
         while guardLoops < ch.sourceCount {
             guard !Task.isCancelled, playGeneration == gen else {
@@ -879,26 +874,31 @@ final class PlayerViewModel: ObservableObject {
             }
 
             if lineTimeoutEnabled {
-                let result = await LineSpeedTester.shared.quickPreflight(raw, timeout: 2.2)
-                guard !Task.isCancelled, playGeneration == gen else {
-                    // preflight 期间被新 play 取消：同样释放自动切换锁，
-                    // 否则 .switching 残留会让后续自动换线永久失效。
-                    if autoSwitchState == .switching { autoSwitchState = .idle }
-                    return
-                }
-                guard currentChannel?.key == ch.key else {
-                    if autoSwitchState == .switching { autoSwitchState = .idle }
-                    return
-                }
-                if lineTimeoutEnabled && result == .hardFail {
-                    triedLineIndices.insert(idx)
-                    LineQualityStore.shared.recordFailure(url: raw)
-                    if autoBlacklistEnabled { storage.blacklistLine(raw) }
-                    currentSourceIndex = (idx + 1) % max(ch.sourceCount, 1)
-                    if guardLoops < ch.sourceCount {
-                        showIndicator("死链已跳过…")
+                // 首候选跳过预检直接起播：首条线是用户历史质量最好的线，直接播画面更快；
+                // 死链由起播阶段慢线硬指标（<200KB/s 3s）快速兜底，无需预检阻塞。
+                let isFirstCandidate = skipFirstPreflight && triedLineIndices.isEmpty
+                if !isFirstCandidate {
+                    let result = await LineSpeedTester.shared.quickPreflight(raw, timeout: 2.2)
+                    guard !Task.isCancelled, playGeneration == gen else {
+                        // preflight 期间被新 play 取消：同样释放自动切换锁，
+                        // 否则 .switching 残留会让后续自动换线永久失效。
+                        if autoSwitchState == .switching { autoSwitchState = .idle }
+                        return
                     }
-                    continue
+                    guard currentChannel?.key == ch.key else {
+                        if autoSwitchState == .switching { autoSwitchState = .idle }
+                        return
+                    }
+                    if lineTimeoutEnabled && result == .hardFail {
+                        triedLineIndices.insert(idx)
+                        LineQualityStore.shared.recordFailure(url: raw)
+                        if autoBlacklistEnabled { storage.blacklistLine(raw) }
+                        currentSourceIndex = (idx + 1) % max(ch.sourceCount, 1)
+                        if guardLoops < ch.sourceCount {
+                            showIndicator("死链已跳过…")
+                        }
+                        continue
+                    }
                 }
             }
 

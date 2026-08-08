@@ -221,8 +221,9 @@ final class MPVPlaybackEngine {
         // 注意：不能再用 stream-lavf-o 传 reconnect=…（该 MPVKit 桥接会把整串当
         // reconnect 的值 → 布尔解析失败 → 每次 https 打开都立即失败，mpv 从未成功
         // 打开过任何 https 源，根因见 v2.3.1 真机日志）。HLS 解复用自身会重试分片。
+        // cache-secs 兼顾首帧速度与流畅：5s 足够出首帧与缓冲，弱网卡顿由快速换线兜底。
         checkError(mpv_set_option_string(ctx, "cache", "yes"))
-        checkError(mpv_set_option_string(ctx, "cache-secs", "10"))
+        checkError(mpv_set_option_string(ctx, "cache-secs", "5"))
         checkError(mpv_set_option_string(ctx, "network-timeout", "20"))
         checkError(mpv_set_option_string(ctx, "user-agent",
             "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15"))
