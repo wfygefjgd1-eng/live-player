@@ -56,6 +56,18 @@ private enum AutoSwitchState {
     case cooldown
 }
 
+/// 自动切换提示弹窗内容（唯一）
+struct AutoSwitchPrompt: Equatable {
+    enum Kind: Equatable {
+        /// 提示「已自动切换线路，是否关闭自动切换」
+        case offerCloseAutoSwitch
+        /// 30 秒无画面/无声后的兜底：提示「开启自动切换」
+        case offerEnableAutoSwitch
+    }
+    let kind: Kind
+    let message: String
+}
+
 @MainActor
 final class PlayerViewModel: ObservableObject {
     @Published var channels: [Channel] = []
@@ -95,6 +107,9 @@ final class PlayerViewModel: ObservableObject {
     private var pendingAutoSwitchReminder: String?
     private var started = false
     private var triedLineIndices = Set<Int>()
+    /// 自动切换提示弹窗（唯一，任意时刻最多一个）。
+    /// non-nil 即显示；nil 表示无弹窗。保证「始终只有一个按钮」。
+    @Published var autoSwitchPrompt: AutoSwitchPrompt? = nil
 
     // 统一任务管理
     private var osdTask: Task<Void, Never>?
@@ -133,6 +148,7 @@ final class PlayerViewModel: ObservableObject {
         player.onError = { [weak self] in self?.onPlayerError() }
         player.onStartupTimeout = { [weak self] in self?.onStartupTimeout() }
         player.onLowSpeed = { [weak self] reason in self?.onLowSpeed(reason) }
+        player.onSilentStall30s = { [weak self] in self?.onSilentStallFallback() }
 
         NetworkMonitor.shared.onSatisfied = { [weak self] in self?.onNetworkBecameAvailable() }
         NetworkMonitor.shared.onConnectionTypeChanged = { [weak self] type in
@@ -405,6 +421,7 @@ final class PlayerViewModel: ObservableObject {
         playTask?.cancel()
         recoverGeneration &+= 1
         pendingAutoSwitchReminder = nil
+        dismissAutoSwitchPrompt()
         autoRecoverChannelHops = 0
         channels = []
         rawChannels = []
@@ -612,6 +629,7 @@ final class PlayerViewModel: ObservableObject {
             // A user action must cancel a queued automatic channel hop.
             recoverGeneration &+= 1
             pendingAutoSwitchReminder = nil
+            dismissAutoSwitchPrompt()
             let now = Date()
             if now.timeIntervalSince(lastChannelSwitchAt) < channelSwitchDebounceInterval { return }
             lastChannelSwitchAt = now
@@ -904,6 +922,8 @@ final class PlayerViewModel: ObservableObject {
         autoRecoverChannelHops = 0
         isBootstrapping = false
         userPaused = false
+        // 下一条线路画面/声音已出来：消除切换提示弹窗（消失机制）
+        dismissAutoSwitchPrompt()
         if let reminder = pendingAutoSwitchReminder {
             pendingAutoSwitchReminder = nil
             if !indicatorText.contains("可在设置中关闭") {
@@ -916,6 +936,45 @@ final class PlayerViewModel: ObservableObject {
         WindowVideoSurface.shared.rebindPlayer()
         updateNowPlaying()
         UIApplication.shared.isIdleTimerDisabled = true
+    }
+
+    // MARK: - 自动切换提示弹窗
+
+    /// 展示自动切换提示，唯一性保证：已存在则不再新弹（直接覆盖内容，仍是唯一按钮）。
+    private func presentAutoSwitchPrompt(kind: AutoSwitchPrompt.Kind) {
+        let message: String
+        switch kind {
+        case .offerCloseAutoSwitch:
+            message = "已自动切换线路"
+        case .offerEnableAutoSwitch:
+            message = "长时间无声无画面，已停止自动切换"
+        }
+        autoSwitchPrompt = AutoSwitchPrompt(kind: kind, message: message)
+    }
+
+    /// 消除弹窗（下一条出画/用户关闭时）
+    func dismissAutoSwitchPrompt() {
+        autoSwitchPrompt = nil
+    }
+
+    /// 用户点击「关闭自动切换」：永久关闭自动切换（设置持久化），隐藏弹窗
+    func handleCloseAutoSwitch() {
+        setLineTimeoutEnabled(false)
+        dismissAutoSwitchPrompt()
+    }
+
+    /// 用户点击「开启自动切换」：重新开启自动切换
+    func handleEnableAutoSwitch() {
+        setLineTimeoutEnabled(true)
+        dismissAutoSwitchPrompt()
+    }
+
+    /// 30 秒无声无画兜底：若自动切换已被关闭，重新弹出「开启自动切换」按钮
+    private func onSilentStallFallback() {
+        // 唯一性：已有弹窗则不重复弹；仅当自动切换关闭时才需要引导重开
+        if autoSwitchPrompt == nil, !lineTimeoutEnabled {
+            presentAutoSwitchPrompt(kind: .offerEnableAutoSwitch)
+        }
     }
 
     func updateNowPlaying() {
@@ -988,8 +1047,18 @@ final class PlayerViewModel: ObservableObject {
         // Keep one automatic switch transaction in flight until its preflight ends.
         if autoSwitchState == .switching { return }
 
+        // 误切复核：画面/声音仍在流动时，不因软信号（超时/低速）误切。
+        // 只有 hardFail 这种确定性证据才绕过复核直接切。
+        if reason == .noData, player.isReady, player.isAudioVideoFlowing() {
+            showIndicator("画面/声音正常，已取消自动切换")
+            return
+        }
+
         autoSwitchState = .switching
         playbackStable = false
+
+        // 自动切换时展示唯一提示弹窗（下一条出画后由 onPlayerReady 消除）
+        presentAutoSwitchPrompt(kind: .offerCloseAutoSwitch)
 
         if autoBlacklistEnabled, currentSourceIndex >= 0, currentSourceIndex < ch.urls.count {
             storage.blacklistLine(ch.urls[currentSourceIndex])
@@ -1083,6 +1152,7 @@ final class PlayerViewModel: ObservableObject {
     func selectChannel(_ ch: Channel) {
         guard let idx = channels.firstIndex(where: { $0.key == ch.key }) else { return }
         pendingAutoSwitchReminder = nil
+        dismissAutoSwitchPrompt()
         // 取消进行中的自动恢复，避免选台后又被 hop 拉走
         recoverGeneration += 1
         autoRecoverChannelHops = 0
@@ -1113,6 +1183,7 @@ final class PlayerViewModel: ObservableObject {
         }
         recoverGeneration += 1
         pendingAutoSwitchReminder = nil
+        dismissAutoSwitchPrompt()
         autoSwitchState = .idle
         autoRecoverChannelHops = 0
         playbackStable = false

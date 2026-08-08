@@ -83,6 +83,8 @@ final class PlayerEngine: ObservableObject {
     private var memoryWarningObserver: NSObjectProtocol?
     private var renderedObserver: NSObjectProtocol?
     private var playStartedAt: Date = .distantPast
+    /// 30 秒无声无画兜底看门狗
+    private var silentStallTask: Task<Void, Never>?
     private var currentURLString = ""
     private var recentStalls: [Date] = []
     private var lastStallAt: Date = .distantPast
@@ -139,6 +141,8 @@ final class PlayerEngine: ObservableObject {
     var onStartupTimeout: (() -> Void)?
     /// 网速过低/无数据触发换线
     var onLowSpeed: ((String) -> Void)?
+    /// 30 秒无声无画面的兜底通知：Viewer 用于重新弹出「开启自动切换」按钮
+    var onSilentStall30s: (() -> Void)?
 
     /// 线路超时/卡顿/低速自动检测（设置可关，默认开）
     var lineTimeoutEnabled: Bool = true
@@ -194,6 +198,7 @@ final class PlayerEngine: ObservableObject {
         avStartupTask?.cancel()
         avDiagnosticsTask?.cancel()
         diagnosticsDismissTask?.cancel()
+        silentStallTask?.cancel()
         cancellables.removeAll()
     }
 
@@ -204,7 +209,12 @@ final class PlayerEngine: ObservableObject {
         mpvStartupTask = nil
         avStartupTask?.cancel()
         avStartupTask = nil
-
+        // 切台前必须完全停止旧后端，否则会出现「双声」：上一频道的声音仍在后台播放。
+        // play() 是切换的统一入口（切台/切线路/自动换线都走这里），在此一次性停干净：
+        // - mpv：stop() 命令停止解复用与渲染
+        // - AVPlayer：pause + 清空 item（释放当前渲染/解码资源）
+        // 之后再启动新源，保证声音与画面都完全切到新的。
+        stopCurrentEngine()
         playToken += 1
         let token = playToken
         activePlayToken = token
@@ -223,6 +233,8 @@ final class PlayerEngine: ObservableObject {
         observedSpeedKBps = 0
         lastAVTotalBytes = 0
         lastAVSampleTime = .distantPast
+        // 启动 30 秒无声无画兜底看门狗（出画后 reportReady 会取消）
+        startSilentStallWatchdog()
 
         if Self.requiresMPV(url) {
             // 已知 AVPlayer 无法处理：直接 mpv，不再先试 AVPlayer
@@ -411,6 +423,8 @@ final class PlayerEngine: ObservableObject {
         mpvStartupTask = nil
         avStartupTask?.cancel()
         avStartupTask = nil
+        // 已出画，取消 30s 兜底看门狗
+        cancelSilentStallWatchdog()
         isPlaying = true
         guard !isReady else { return }
         isReady = true
@@ -483,6 +497,41 @@ final class PlayerEngine: ObservableObject {
 
     var hasCurrentMedia: Bool {
         currentURL != nil
+    }
+
+    /// 当前是否有「声画在流动」。（Viewer 用于自动换线前的复核：若仍正常播放则取消误切）
+    /// - AVPlayer：正在播放 + 缓冲充足 + 视频尺寸已就绪
+    /// - mpv：已出画（尺寸>0）+ 未暂停缓存（core 非 idle）
+    func isAudioVideoFlowing() -> Bool {
+        guard isReady else { return false }
+        if activeBackend == .mpv {
+            let sample = mpvEngine.diagnosticsSample()
+            return sample.hasVideoOutput
+                && sample.width > 0 && sample.height > 0
+                && sample.stateText == "播放中"
+        } else {
+            guard let item = avItem else { return false }
+            let size = item.presentationSize
+            return avStateText() == "播放中"
+                && item.isPlaybackLikelyToKeepUp
+                && !item.isPlaybackBufferEmpty
+                && size.width > 1 && size.height > 1
+        }
+    }
+
+    /// 30 秒无声无画兜底：启动一个后台看门狗，若 30s 内声画一直未流动则回调。
+    func startSilentStallWatchdog() {
+        silentStallTask?.cancel()
+        silentStallTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 30_000_000_000)
+            guard let self, !Task.isCancelled, !self.isAudioVideoFlowing(), self.hasCurrentMedia else { return }
+            self.onSilentStall30s?()
+        }
+    }
+
+    func cancelSilentStallWatchdog() {
+        silentStallTask?.cancel()
+        silentStallTask = nil
     }
 
     /// Re-arm line monitoring when the setting changes during playback.
@@ -560,6 +609,27 @@ final class PlayerEngine: ObservableObject {
     }
 
     // MARK: - Private — State Management
+
+    /// 完全停止当前内核的播放（无论 mpv 还是 AVPlayer），释放音频/画面资源。
+    /// 切台/切线路必须调用，防止上一频道在后台继续出声（双声 bug）。
+    private func stopCurrentEngine() {
+        // 停止 mpv（若正在使用）
+        mpvEngine.stop()
+        // 停止 AVPlayer：暂停并清空 item，释放渲染/解码
+        avPlayer.pause()
+        avPlayer.replaceCurrentItem(with: nil)
+        teardownAVObservers()
+        // 清理诊断采样循环
+        diagnosticsTask?.cancel()
+        diagnosticsTask = nil
+        avDiagnosticsTask?.cancel()
+        avDiagnosticsTask = nil
+        diagnosticsDismissTask?.cancel()
+        diagnosticsDismissTask = nil
+        stopStallCheck()
+        cancelAllTasks()
+        avRenderedConsecutive = 0
+    }
 
     private func resetState(for token: Int) {
         mpvStartupTask?.cancel()

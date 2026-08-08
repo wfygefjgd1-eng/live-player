@@ -208,6 +208,16 @@ struct ContentView: View {
                     }
                     .allowsHitTesting(false)
                 }
+
+                // 自动切换提示弹窗（唯一）：关闭自动切换 / 30s 无声画后引导开启
+                if let prompt = vm.autoSwitchPrompt {
+                    AutoSwitchPromptView(
+                        message: prompt.message,
+                        kind: prompt.kind,
+                        onClose: { vm.handleCloseAutoSwitch() },
+                        onEnable: { vm.handleEnableAutoSwitch() }
+                    )
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -255,6 +265,67 @@ struct ContentView: View {
                 .overlay(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 0.5))
                 .allowsHitTesting(false)
             }
+        }
+    }
+
+    /// 自动切换提示弹窗（唯一，居中偏上）。含关闭/开启按钮。
+    /// 消失机制：下一条线路画面/声音出来后由 onPlayerReady 清空 autoSwitchPrompt。
+    /// OK 键（keyboard/遥控）在弹窗显示时优先响应按钮（见 handleKeyPress），
+    /// 弹窗不存在时 OK 键保留暂停/恢复画面功能。
+    private struct AutoSwitchPromptView: View {
+        let message: String
+        let kind: AutoSwitchPrompt.Kind
+        let onClose: () -> Void
+        let onEnable: () -> Void
+
+        var body: some View {
+            VStack(spacing: 14) {
+                Text(message)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(.white)
+                    .multilineTextAlignment(.center)
+                HStack(spacing: 12) {
+                    switch kind {
+                    case .offerCloseAutoSwitch:
+                        Button {
+                            onClose()
+                        } label: {
+                            Text("关闭自动切换")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 8)
+                                .background(Color.orange.opacity(0.85))
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    case .offerEnableAutoSwitch:
+                        Button {
+                            onEnable()
+                        } label: {
+                            Text("开启自动切换")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 8)
+                                .background(Color.orange.opacity(0.85))
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+            .background(Color.black.opacity(0.78))
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(Color.white.opacity(0.25), lineWidth: 0.6)
+            )
+            .padding(.top, 24)
+            .transition(.opacity)
+            .animation(.easeOut(duration: 0.2), value: message)
         }
     }
 
@@ -342,7 +413,20 @@ struct ContentView: View {
             appendNumber(digit)
             return .handled
         }
-        if press.key == .return { confirmNumberInput(); return .handled }
+        if press.key == .return {
+            // 弹窗可见时，OK 键优先响应弹窗按钮（关闭/开启自动切换）
+            if let prompt = vm.autoSwitchPrompt {
+                switch prompt.kind {
+                case .offerCloseAutoSwitch:
+                    vm.handleCloseAutoSwitch()
+                case .offerEnableAutoSwitch:
+                    vm.handleEnableAutoSwitch()
+                }
+                return .handled
+            }
+            confirmNumberInput()
+            return .handled
+        }
         if press.key == .escape { cancelNumberInput(); return .handled }
         if press.key == .delete, !numberInput.isEmpty {
             numberInput.removeLast()
