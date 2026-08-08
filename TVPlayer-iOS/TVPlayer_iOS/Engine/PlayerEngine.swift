@@ -20,13 +20,14 @@ final class PlayerEngine: ObservableObject {
     static let startupHardTimeoutNs: UInt64 = 12_000_000_000
     /// 出画后保护：此期间禁止因软问题换线
     static let readyProtectNs: UInt64 = 4_000_000_000
-    static let progressStallThreshold: TimeInterval = 8.0
+    static let progressStallThreshold: TimeInterval = 12.0
 
-    /// mpv 起播超时；慢 HLS 长分片源单独放宽（见 startupTimeoutNs(for:)）
-    static let mpvStartupTimeoutNs: UInt64 = 25_000_000_000
-    static let mpvSlowSourceTimeoutNs: UInt64 = 40_000_000_000
-    /// AVPlayer 起播超时（系统内核通常很快；给足缓冲时间）
-    static let avPlayerStartupTimeoutNs: UInt64 = 30_000_000_000
+    /// 内核差异化超时：官方 AVPlayer 原生快，少等（20s）；mpv 需多等（35s）；
+    /// 慢 HLS 长分片源（如 264788）单独放宽（50s）。避免「固定短超时」误砍慢内核。
+    static let mpvStartupTimeoutNs: UInt64 = 35_000_000_000
+    static let mpvSlowSourceTimeoutNs: UInt64 = 50_000_000_000
+    /// AVPlayer 起播超时（官方内核最快；20s 足够，不必赔慢）
+    static let avPlayerStartupTimeoutNs: UInt64 = 20_000_000_000
 
     /// 慢源判定：live.264788.xyz 使用超长分片，起播/缓冲都要更久
     static func startupTimeoutNs(for url: URL) -> UInt64 {

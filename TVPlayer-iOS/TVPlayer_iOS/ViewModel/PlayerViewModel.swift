@@ -1047,9 +1047,11 @@ final class PlayerViewModel: ObservableObject {
         // Keep one automatic switch transaction in flight until its preflight ends.
         if autoSwitchState == .switching { return }
 
-        // 误切复核：画面/声音仍在流动时，不因软信号（超时/低速）误切。
-        // 只有 hardFail 这种确定性证据才绕过复核直接切。
-        if reason == .noData, player.isReady, player.isAudioVideoFlowing() {
+        // 误切复核：画面/声音仍在流动时，不因软信号（超时/低速/AVPlayer误报）误切。
+        // 真失败时引擎会离开「播放中」，isAudioVideoFlowing() 返回 false → 放行切换；
+        // 仅当「其实还在播」（item 误报 failed / 瞬时抖动）时才被拦下，避免误杀。
+        // hardFail 也复核：AVPlayer 对某些直播源会瞬时误报 failed，画面明明在动。
+        if player.isReady, player.isAudioVideoFlowing() {
             showIndicator("画面/声音正常，已取消自动切换")
             return
         }
