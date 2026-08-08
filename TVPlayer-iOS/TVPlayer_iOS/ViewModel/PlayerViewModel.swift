@@ -668,7 +668,9 @@ final class PlayerViewModel: ObservableObject {
             panelVisible = false
         }
         triedLineIndices.removeAll()
-        playCurrent(resetTried: true)
+        // 手动滑台跳过线路预检，立即起播，消除 2s 网络探活延迟；
+        // 自动恢复（userInitiated=false）仍走预检，快速跳过死链。
+        playCurrent(resetTried: true, preflight: !userInitiated)
     }
 
     private func persistLastChannel() {
@@ -836,7 +838,7 @@ final class PlayerViewModel: ObservableObject {
         return ch.urls[currentSourceIndex]
     }
 
-    func playCurrent(showOSD: Bool = true, resetTried: Bool = false) {
+    func playCurrent(showOSD: Bool = true, resetTried: Bool = false, preflight: Bool = true) {
         guard let ch = currentChannel else {
             showIndicator("当前频道地址无效")
             return
@@ -857,12 +859,12 @@ final class PlayerViewModel: ObservableObject {
         playTask?.cancel()
         playTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            await self.playLineLoop(channel: ch, generation: gen, showOSD: showOSD)
+            await self.playLineLoop(channel: ch, generation: gen, showOSD: showOSD, preflight: preflight)
         }
     }
 
     /// 统一起播：仅 hardFail 预检跳过；unknown/ok 交给系统播放器。
-    private func playLineLoop(channel ch: Channel, generation gen: Int, showOSD: Bool) async {
+    private func playLineLoop(channel ch: Channel, generation gen: Int, showOSD: Bool, preflight: Bool = true) async {
         var guardLoops = 0
         while guardLoops < ch.sourceCount {
             guard !Task.isCancelled, playGeneration == gen else { return }
@@ -899,7 +901,7 @@ final class PlayerViewModel: ObservableObject {
                 return
             }
 
-            if lineTimeoutEnabled {
+            if preflight, lineTimeoutEnabled {
                 let result = await LineSpeedTester.shared.quickPreflight(raw, timeout: 2.2)
                 guard !Task.isCancelled, playGeneration == gen else { return }
                 guard currentChannel?.key == ch.key else { return }
