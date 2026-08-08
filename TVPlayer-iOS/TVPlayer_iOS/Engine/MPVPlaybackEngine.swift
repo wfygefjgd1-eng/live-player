@@ -144,6 +144,10 @@ final class MPVPlaybackEngine {
         command("loadfile", args: [url.absoluteString, "replace"])
         onStateChanged?("正在打开")
 
+        // 起播前确保解除暂停：stop() 不会复位 pause 属性，若上一会话暂停过，
+        // 新文件加载后会一直停在暂停（画面冻结、无声音），必须显式恢复播放。
+        setFlagProperty("pause", false)
+
         // 开启后台采样循环
         samplerCancelled = false
         scheduleNextSample()

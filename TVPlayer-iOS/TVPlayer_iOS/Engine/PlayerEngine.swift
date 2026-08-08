@@ -429,21 +429,6 @@ final class PlayerEngine: ObservableObject {
         isPlaying = true
         guard !isReady else { return }
         isReady = true
-        // 确保转圈至少显示 minSwitchDisplayTime：快速源出画太快也要让用户看到反馈
-        let elapsed = Date().timeIntervalSince(switchStartedAt)
-        let remaining = Self.minSwitchDisplayTime - elapsed
-        if remaining > 0 {
-            // 用 playToken 守卫：若在展示窗口内又切到新台（token 已变），
-            // 不得把新台的「切换中」转圈提前关掉。
-            let token = playToken
-            Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
-                guard let self, !Task.isCancelled, self.playToken == token else { return }
-                self.isSwitching = false
-            }
-        } else {
-            isSwitching = false
-        }
         diagnostics.timeControlStatus = "播放中"
         diagnostics.waitingReason = "无"
         diagnostics.isBufferEmpty = false
@@ -454,17 +439,49 @@ final class PlayerEngine: ObservableObject {
             url: currentURLString,
             startupSeconds: startupSeconds
         )
-        onReady?()
-        WindowVideoSurface.shared.rebindPlayer()
 
-        stallWatchEnabled = false
-        scheduleTask(named: "readyProtect", token: playToken, timeout: Self.readyProtectNs) { [weak self] in
-            // scheduleTask 内部已按 token 过滤，此处只需存活校验
-            guard let self else { return }
-            self.stallWatchEnabled = true
-            if self.activeBackend == .mpv {
-                self.startStallCheck(token: playToken)
+        // 「正在加载/转圈」与提示的消失跟随声画真实流动，而非固定 0.8s。
+        // 至少展示 minSwitchDisplayTime（快速源一闪而过要让用户看清频道），
+        // 之后持续轮询 isAudioVideoFlowing()：声画免疫瞬时缓冲抖动，确认稳定流动
+        // 才关闭转圈并回调 onReady（上层据此清除「正在加载」提示）。
+        // 用 playToken 守卫：窗口内又切到新台则作废，不得误关新台反馈。
+        let elapsed = Date().timeIntervalSince(switchStartedAt)
+        let minimumDisplay = max(0, Self.minSwitchDisplayTime - elapsed)
+        let token = playToken
+        let backend = activeBackend
+        let fireOnReady = { [weak self] in
+            self?.onReady?()
+            WindowVideoSurface.shared.rebindPlayer()
+            self?.stallWatchEnabled = false
+            self?.scheduleTask(named: "readyProtect", token: token, timeout: Self.readyProtectNs) {
+                guard let self else { return }
+                self.stallWatchEnabled = true
+                if self.activeBackend == .mpv {
+                    self.startStallCheck(token: token)
+                }
             }
+        }
+        Task { @MainActor [weak self] in
+            if minimumDisplay > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(minimumDisplay * 1_000_000_000))
+            }
+            guard let self, !Task.isCancelled, self.playToken == token,
+                  self.activeBackend == backend else { return }
+            // 声画流动确认。轮询带硬上限：超时（约 8s）也不得让转圈永久挂着，
+            // 强制转出并触发 onReady；若真的坏线，将由上层 onStartupTimeout / 静音
+            // 看门狗继续换线兜底。250ms × 32 ≈ 8s。
+            var attempts = 0
+            while !Task.isCancelled, self.playToken == token, attempts < 32 {
+                if self.isAudioVideoFlowing() {
+                    self.isSwitching = false
+                    fireOnReady()
+                    return
+                }
+                attempts += 1
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+            self.isSwitching = false
+            fireOnReady()
         }
     }
 
