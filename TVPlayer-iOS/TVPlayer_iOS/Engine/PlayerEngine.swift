@@ -17,16 +17,20 @@ import UIKit
 final class PlayerEngine: ObservableObject {
     // MARK: - 配置
     /// 起播硬上限：慢 HLS 也要给足时间，避免「没几个能看」
-    static let startupHardTimeoutNs: UInt64 = 12_000_000_000
-    /// 出画后保护：此期间禁止因软问题换线
     static let readyProtectNs: UInt64 = 4_000_000_000
     static let progressStallThreshold: TimeInterval = 8.0
 
     /// mpv 起播超时；慢 HLS 长分片源单独放宽（见 startupTimeoutNs(for:)）
-    static let mpvStartupTimeoutNs: UInt64 = 25_000_000_000
-    static let mpvSlowSourceTimeoutNs: UInt64 = 40_000_000_000
-    /// AVPlayer 起播超时（系统内核通常很快；给足缓冲时间）
-    static let avPlayerStartupTimeoutNs: UInt64 = 30_000_000_000
+    /// 起播绝对上限（网络门控下的兜底）：网络达标（≥200KB/s）就继续等；
+    /// 但无论网络如何，超过 safeLineCapSeconds 仍不出画就切。这取代了旧的
+    /// 固定 25/30/40 秒超时——慢源只要在传数据就相对稳定，异常源最多 15 秒兜底。
+    static let safeLineCapSeconds: TimeInterval = 15.0
+    static let safeLineCapNs: UInt64 = 15_000_000_000
+    /// mpv 起播/慢源超时统一走 safeLineCap 网络门控
+    static let mpvStartupTimeoutNs: UInt64 = safeLineCapNs
+    static let mpvSlowSourceTimeoutNs: UInt64 = safeLineCapNs
+    /// AVPlayer 起播超时同样统一
+    static let avPlayerStartupTimeoutNs: UInt64 = safeLineCapNs
 
     /// 慢源判定：live.264788.xyz 使用超长分片，起播/缓冲都要更久
     static func startupTimeoutNs(for url: URL) -> UInt64 {
@@ -98,14 +102,28 @@ final class PlayerEngine: ObservableObject {
     private var consecutiveBufferSeconds: Double = 0
     private var lowSpeedReported = false
 
+    /// 慢线硬指标：网络不达标（<200KB/s）持续停滞 → 快速换线；网络达标则继续等。
+    /// 这是「死链 vs 慢源」的核心区分——网络在流动说明源活着，不误杀慢源。
+    static let slowLineSpeedThresholdKBps: Double = 200
+    static let slowLineDurationSeconds: TimeInterval = 3.0
+    /// 当前是否处于「慢线证据」积累中（网络不达标 + 声画无进展持续计数）
+    private var slowLineEvidenceStartedAt: Date? = nil
+    /// 本次 play() 内是否出现过一次达标网速（≥200KB/s）。
+    /// 起播初期网速从 0 开始（尚未连上数据源），若从未达标就卡住 3s → 判死线快速切；
+    /// 一旦达标过，说明源在传数据，转入「网络流动等待」不轻易误杀。
+    private var hasSeenHealthySpeed = false
+
+    /// 多信号健康确认：连续健康拍数（每 0.5s 采样 1 拍）。达到阈值才宣布健康。
+    private var healthyConsecutivePulses = 0
+    /// 多信号健康确认所需的最小连续拍数：2 拍（1s）避免单拍抖动误判。
+    static let healthyPulsesRequired = 2
+    /// 健康态一旦确立后不再回退（本线路出画即视为可用，卡顿交给 stall 检测而非转圈）
+    private var healthyEverEstablished = false
+
     /// 最近一次有效网速采样的时间：超时（1.5s 无新数据）即归零，避免显示过期速度。
     /// 太短会因直播分片间隙抖动闪烁，太长会掩盖断网；0.5s 采样 × 3 拍为界。
     private var lastValidSpeedSampleAt: Date = .distantPast
     private let speedStaleTimeout: TimeInterval = 1.5
-
-    /// 切台最小展示时长：防止快速源出画太快导致转圈一闪而过
-    private var switchStartedAt: Date = .distantPast
-    static let minSwitchDisplayTime: TimeInterval = 0.8
 
     /// AVPlayer 累计字节追踪（用于计算真实瞬时下载速度）
     private var lastAVTotalBytes: Int64 = 0
@@ -115,6 +133,9 @@ final class PlayerEngine: ObservableObject {
     @Published var isPlaying = false
     /// 正在切台/切线路（起播中未出画）：UI 显示「正在切换」反馈
     @Published private(set) var isSwitching = false
+    /// 多信号确认的健康态：有声 + 有画 + 画面在流转（事件驱动，无固定时长）。
+    /// 由 UI 加载窗口观察；连续健康拍数达标后才置 true。
+    @Published private(set) var isPlaybackHealthy = false
     /// 最近采样网速 KB/s（供 UI/调试）
     @Published var observedSpeedKBps: Double = 0
     @Published private(set) var diagnostics = PlaybackDiagnostics()
@@ -216,13 +237,19 @@ final class PlayerEngine: ObservableObject {
         isReady = false
         isPlaying = true
         isSwitching = true
-        switchStartedAt = Date()
         lastValidSpeedSampleAt = .distantPast
         // 复位网速显示与差分测速状态：切换/新内核后立即归零，
         // 避免转圈下残留旧频道速度、或差分 guard 吃着旧流的累计字节而长期失效。
         observedSpeedKBps = 0
         lastAVTotalBytes = 0
         lastAVSampleTime = .distantPast
+        // 复位多信号健康态：新线路必须重新确认「声画流动」才关闭加载窗口
+        isPlaybackHealthy = false
+        healthyEverEstablished = false
+        healthyConsecutivePulses = 0
+        // 复位慢线证据：新线路从零开始，必须重新确认是否「曾达标」与是否停滞
+        hasSeenHealthySpeed = false
+        slowLineEvidenceStartedAt = nil
 
         if Self.requiresMPV(url) {
             // 已知 AVPlayer 无法处理：直接 mpv，不再先试 AVPlayer
@@ -399,6 +426,12 @@ final class PlayerEngine: ObservableObject {
         diagnostics.reason = reason
         recordFailureOnce()
         isSwitching = false
+        // 失败即中止本次线路的健康态，避免残留健康标记影响下一次起播
+        isPlaybackHealthy = false
+        healthyEverEstablished = false
+        healthyConsecutivePulses = 0
+        hasSeenHealthySpeed = false
+        slowLineEvidenceStartedAt = nil
         if isReady {
             onError?()
         } else {
@@ -414,21 +447,9 @@ final class PlayerEngine: ObservableObject {
         isPlaying = true
         guard !isReady else { return }
         isReady = true
-        // 确保转圈至少显示 minSwitchDisplayTime：快速源出画太快也要让用户看到反馈
-        let elapsed = Date().timeIntervalSince(switchStartedAt)
-        let remaining = Self.minSwitchDisplayTime - elapsed
-        if remaining > 0 {
-            // 用 playToken 守卫：若在展示窗口内又切到新台（token 已变），
-            // 不得把新台的「切换中」转圈提前关掉。
-            let token = playToken
-            Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
-                guard let self, !Task.isCancelled, self.playToken == token else { return }
-                self.isSwitching = false
-            }
-        } else {
-            isSwitching = false
-        }
+        // 加载窗口由多信号健康确认（isPlaybackHealthy）决定何时消失；
+        // isSwitching 此时保持 true，直到健康达标才清（见 evaluatePlaybackHealth）。
+
         diagnostics.timeControlStatus = "播放中"
         diagnostics.waitingReason = "无"
         diagnostics.isBufferEmpty = false
@@ -544,6 +565,12 @@ final class PlayerEngine: ObservableObject {
         failureRecorded = false
         lastValidSpeedSampleAt = .distantPast
         observedSpeedKBps = 0
+        // 复位多信号健康态
+        isPlaybackHealthy = false
+        healthyEverEstablished = false
+        healthyConsecutivePulses = 0
+        hasSeenHealthySpeed = false
+        slowLineEvidenceStartedAt = nil
     }
 
     var volume: Float {
@@ -735,11 +762,17 @@ final class PlayerEngine: ObservableObject {
 
     private func refreshDiagnostics(reason: String?) {
         flagDiagnosticsForReason(reason)
+        // 每个采样拍评估多信号健康态（事件驱动，连续拍达标才关加载窗口）
+        evaluatePlaybackHealth()
         if activeBackend == .mpv {
             let sample = mpvEngine.diagnosticsSample()
             // 实时下载速度：cache-speed = 缓存实时填充速率（KB/s），
             // demux bitrate 是长时间滑动均值，长分片源在分片下载间歇会掉到 0。
             updateSpeed(rawKBps: sample.cacheSpeedKBps)
+            // 慢线硬指标：mpv 分支。起播与播放中都评估（0.5s 一拍），
+            // 网络不达标持续 slowLineDuration 秒 → 切。声画在动则视为正常。
+            let isProgressing = sample.hasVideoOutput && sample.stateText == "播放中"
+            checkSlowLineEvidence(isProgressing: isProgressing)
             diagnostics = PlaybackDiagnostics(
                 observedBitrate: observedSpeedKBps * 1024 * 8,
                 averageVideoBitrate: sample.averageVideoBitrate,
@@ -756,6 +789,7 @@ final class PlayerEngine: ObservableObject {
                 isLikelyToKeepUp: sample.hasVideoOutput && sample.stateText == "播放中",
                 isBufferEmpty: false,
                 playbackClockSeconds: sample.playbackClockSeconds,
+                audioVideoSyncDiff: sample.audioVideoSyncDiff,
                 engineName: activeEngineName,
                 reason: reason ?? diagnostics.reason
             )
@@ -763,7 +797,62 @@ final class PlayerEngine: ObservableObject {
         // AVPlayer 分支的 diagnostics/网速由 sampleAVDiagnostics() 采样维护，此处无需处理。
     }
 
-    // MARK: - AVPlayer 轻量采样（0.5s，主线程安全）
+// MARK: - 多信号健康确认（事件驱动）
+
+    /// 每个采样拍评估一次当前是否有「声画在流动」。多信号判定：
+    /// - 画面：已确认出画且画面在流转（视频尺寸就绪 + 播放态）
+    /// - 网络：采样网速 / mpv cache-speed > 0（资源在流动；分片间歇瞬时为 0
+    ///   由 1.5s 滞留窗口容忍）
+    /// - 声音：有音频轨且在动；纯视频流（无音轨）不因「无声」卡转圈
+    ///
+    /// 事件驱动而非计时：每拍（0.5s）真实重算，连续 healthyPulsesRequired 拍才宣布健康。
+    /// 获得过一次健康后不再回退：同一线路已证明可播，之后卡顿交给 stall 检测换线，
+    /// 转圈不再反复弹出。
+    private func evaluatePlaybackHealth() {
+        guard isReady, lineTimeoutEnabled, !healthyEverEstablished else { return }
+        // 允许在 isSwitching 期间评估：加载窗口要在「声画流动」确认后才消失
+        if isAudioVideoFlowing() {
+            healthyConsecutivePulses += 1
+            if healthyConsecutivePulses >= Self.healthyPulsesRequired {
+                healthyEverEstablished = true
+                isPlaybackHealthy = true
+                // 健康确认：加载窗口随之关闭（isSwitching 语义回到「已就绪」）
+                if isSwitching {
+                    isSwitching = false
+                }
+            }
+        } else {
+            healthyConsecutivePulses = 0
+        }
+    }
+
+    /// 当前采样拍是否「声画在流动、网络在动」。
+    /// - AVPlayer：画面=视频轨存在且有尺寸+播放中（纯音频流则仅要求播放中）。
+    ///   声音=有音频轨且缓冲未空；网络由「播放中 + 缓冲充足」隐含（分片间隙
+    ///   差分网速会瞬时为 0，仅靠网速判断会把好线误判为不健康）
+    /// - mpv：画面=hasVideoOutput 且帧率可读；声音=audio-pts 前进（纯视频流跳过）；
+    ///   网络=cache-speed>0 或采样网速>0（mpv 的 cache-speed 是平滑值，抖动小）
+    func isAudioVideoFlowing() -> Bool {
+        if activeBackend == .mpv {
+            let sample = mpvEngine.diagnosticsSample()
+            let videoOK = sample.hasVideoOutput
+                && (sample.outputFrameRate > 0 || sample.nominalFrameRate > 0)
+            let networkOK = sample.cacheSpeedKBps > 0 || observedSpeedKBps > 0
+            let audioOK = sample.hasAudioProgress || !sample.hasAudioCapability
+            return videoOK && networkOK && audioOK
+        } else {
+            guard let item = avItem else { return false }
+            let state = avStateText()
+            let hasVideoTrack = item.tracks.contains { $0.assetTrack?.mediaType == .video }
+            let hasAudioTrack = item.tracks.contains { $0.assetTrack?.mediaType == .audio }
+            let hasVideo = item.presentationSize.width > 1 && item.presentationSize.height > 1
+            let playing = state == "播放中" && item.isPlaybackLikelyToKeepUp
+            let videoOK = hasVideoTrack ? (hasVideo && playing) : playing
+            let audioOK = hasAudioTrack ? !item.isPlaybackBufferEmpty : true
+            // 网络流动由「播放中 + 缓冲充足」隐含，不再单独要求差分网速>0
+            return videoOK && audioOK
+        }
+    }
 
     private func startAVDiagnostics(token: Int) {
         avDiagnosticsTask?.cancel()
@@ -774,6 +863,50 @@ final class PlayerEngine: ObservableObject {
                       self.activeBackend == .avPlayer else { return }
                 self.sampleAVDiagnostics()
             }
+        }
+    }
+
+    // MARK: - 慢线硬指标（卡住 + 低速 → 快速换线）
+
+/// 网络门控的慢线判定：源的网络不达标才累计停滞，达标则重置继续等。
+    /// 这是「死链 vs 慢源」的核心区分——网络在流动（≥阈值）说明源还活着，
+    /// 愿意等它起播/恢复；网络停滞（<阈值，含死链 0 字节）持续 slowLineDuration
+    /// 秒就切——起播阶段同样生效（死链、被墙源无需等 15s 上限，3s 即走）。
+    /// 每次 play() / 出画会复位证据起点。
+    private func checkSlowLineEvidence(isProgressing: Bool) {
+        guard lineTimeoutEnabled, !lowSpeedReported else {
+            slowLineEvidenceStartedAt = nil
+            return
+        }
+        let speed = observedSpeedKBps
+        // 网络达标（≥200KB/s）：源在传数据，重置停滞计时继续等——不误杀慢源
+        if speed >= Self.slowLineSpeedThresholdKBps {
+            hasSeenHealthySpeed = true
+            slowLineEvidenceStartedAt = nil
+            return
+        }
+        // 起播就未达标（速度从未 ≥200）：只要停滞即按死线快速切，不拖到 15s 上限
+        if !hasSeenHealthySpeed {
+            if slowLineEvidenceStartedAt == nil {
+                slowLineEvidenceStartedAt = Date()
+            }
+            if let start = slowLineEvidenceStartedAt,
+               Date().timeIntervalSince(start) >= Self.slowLineDurationSeconds, !isProgressing {
+                lowSpeedReported = true
+                slowLineEvidenceStartedAt = nil
+                onLowSpeed?("线路网速不足 \(Int(Self.slowLineSpeedThresholdKBps))KB/s，自动换线")
+            }
+            return
+        }
+        // 已达标过一次（源确实在传）：落速停滞 slowLineDuration 且声画无进展 → 切
+        if slowLineEvidenceStartedAt == nil {
+            slowLineEvidenceStartedAt = Date()
+        }
+        guard let start = slowLineEvidenceStartedAt else { return }
+        if Date().timeIntervalSince(start) >= Self.slowLineDurationSeconds && !isProgressing {
+            lowSpeedReported = true
+            slowLineEvidenceStartedAt = nil
+            onLowSpeed?("线路网速不足 \(Int(Self.slowLineSpeedThresholdKBps))KB/s，自动换线")
         }
     }
 
@@ -847,7 +980,10 @@ final class PlayerEngine: ObservableObject {
         }
 
         // 卡顿/无数据
-        if item.isPlaybackBufferEmpty || state == "缓冲中" {
+        // 出画保护期（readyProtect 4s）内不判定缓冲型软问题：与 mpv 分支一致，
+        // 否则 AVPlayer 起播成功后 4 秒内的一次短暂抖动就会累计触发 onLowSpeed
+        // 把刚出画的线路立刻换走（此前无门控，保护只对 mpv 生效）。
+        if stallWatchEnabled, item.isPlaybackBufferEmpty || state == "缓冲中" {
             registerStall()
             consecutiveBufferSeconds += 1
             if consecutiveBufferSeconds >= Self.progressStallThreshold, !lowSpeedReported {
@@ -858,6 +994,13 @@ final class PlayerEngine: ObservableObject {
             consecutiveBufferSeconds = 0
             lowSpeedReported = false
         }
+        // 慢线硬指标：AVPlayer 分支，卡住 + 网速过低 → 3s 快速换线
+        let progressing = state == "播放中"
+            && !item.isPlaybackBufferEmpty
+            && size.width > 1 && size.height > 1
+        checkSlowLineEvidence(isProgressing: progressing)
+        // 多信号健康态评估（AVPlayer 分支同样事件驱动）
+        evaluatePlaybackHealth()
     }
 }
 

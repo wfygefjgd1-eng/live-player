@@ -228,28 +228,36 @@ struct ContentView: View {
         return "--"
     }
 
-    /// 切台中转圈 + 实时网速：直接 @ObservedObject 观察 player，采样点即时刷新
+    /// 加载中转圈 + 实时网速：直接 @ObservedObject 观察 player，采样点即时刷新。
+    /// 消失时机 = 多信号确认有声画（isPlaybackHealthy），而非固定时长；
+    /// 即使画面还在卡，只要未确认真实声画，窗口就保持。
     private struct SwitchingOverlay: View {
         @ObservedObject var player: PlayerEngine
 
         var body: some View {
-            if player.isSwitching {
-                VStack(spacing: 10) {
+            if player.isSwitching && !player.isPlaybackHealthy {
+                // 正方形样式：上=加载圈，下=实时网速
+                VStack(spacing: 14) {
                     ProgressView()
                         .controlSize(.large)
                         .tint(.white)
+                        .padding(.top, 18)
+                    Text("在加载")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(.white.opacity(0.85))
                     Text(speedText(player.observedSpeedKBps))
                         .font(.system(size: 22, weight: .bold, design: .monospaced))
                         .monospacedDigit()
                         .foregroundColor(.white)
-                    Text("切换中")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(.white.opacity(0.7))
+                        .padding(.bottom, 18)
                 }
-                .padding(.horizontal, 28)
-                .padding(.vertical, 20)
-                .background(Color.black.opacity(0.65))
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .frame(width: 132, height: 132)
+                .background(Color.black.opacity(0.72))
+                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .stroke(Color.white.opacity(0.18), lineWidth: 0.6)
+                )
                 .allowsHitTesting(false)
             }
         }
@@ -434,7 +442,9 @@ private struct PlaybackDiagnosticsOverlay: View {
             Text("内核 \(d.engineName)")
             Text("画面 \(d.resolutionText)  输出/源 \(fps(d.currentVideoFrameRate))/\(fps(d.nominalVideoFrameRate)) fps")
             Text("丢帧 \(d.droppedVideoFrames)  +\(String(format: "%.1f", d.droppedFramesPerSecond))/秒")
-            Text("音画偏差 \(String(format: "%.3f", d.audioVideoSyncDiff)) 秒")
+            if d.audioVideoSyncDiff > 0.001 {
+                Text("音画偏差 \(String(format: "%.3f", d.audioVideoSyncDiff)) 秒")
+            }
             Text("缓冲 \(String(format: "%.1f", d.bufferSeconds)) 秒  \(d.isLikelyToKeepUp ? "可持续" : "不足")")
             Text("下载 \(mbps(d.observedBitrate))  视频 \(mbps(d.averageVideoBitrate))")
             Text("状态 \(d.timeControlStatus)  卡顿 \(d.stallCount)  等待：\(d.waitingReason)")

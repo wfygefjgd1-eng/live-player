@@ -34,6 +34,12 @@ final class MPVPlaybackEngine {
         var hwdecActive = false
         /// playback-abort：mpv 是否已因致命错误中止（被错误日志吞掉时也能看出来）
         var playbackAborted = false
+        /// 音画时钟偏差（秒）：audio-pts 与 video-pts 的差的绝对值；未知时为 0
+        var audioVideoSyncDiff: TimeInterval = 0
+        /// 音频是否在流动：audio-pts 大于 0 且核心未暂停（直播通常必有音轨）
+        var hasAudioProgress = false
+        /// 当前流是否存在音频轨（track-list 判断）；纯视频流时音频信号让位给画面
+        var hasAudioCapability = false
     }
 
     var onPlaying: (() -> Void)?
@@ -337,6 +343,18 @@ final class MPVPlaybackEngine {
         let paused = getFlagProperty("pause")
         let hwdecActive = getFlagProperty("hwdec-active")
         let playbackAborted = getFlagProperty("playback-abort")
+        // 音画时钟差：audio-pts - video-pts。正说明音频领先，负说明视频领先。
+        // 两者都未知（正在打开/无轨）时保持 0，由上层仅在有值才算偏差。
+        let audioPTS = getDoubleProperty("audio-pts")
+        let videoPTS = getDoubleProperty("video-pts")
+        let syncDiff = (audioPTS.isFinite && videoPTS.isFinite && audioPTS != 0 && videoPTS != 0)
+            ? abs(audioPTS - videoPTS) : 0
+        // 音频在流动：audio-pts 已推进（>0）且不在暂停/缓冲。mpv 在纯视频流时
+        // audio-pts 恒为 0，此时不误判为无声，由上层按「视频流动」单独确认。
+        let hasAudioProgress = audioPTS.isFinite && audioPTS > 0 && !paused && !pausedForCache && !coreIdle
+        // 是否存在音频轨：mpv 的 aid != no。纯视频流 aid 为空（查询返回 0/无），
+        // 上层据此跳过「声音」这一信号，避免无声源永远卡转圈。
+        let hasAudioCapability = getInt64Property("aid") > 0
 
         let hasVideo = width > 0 && height > 0
         let stateText: String
@@ -360,7 +378,10 @@ final class MPVPlaybackEngine {
             hasVideoOutput: hasVideo && !coreIdle && !pausedForCache,
             cacheSpeedKBps: Double(cacheSpeed) / 1024,
             hwdecActive: hwdecActive,
-            playbackAborted: playbackAborted
+            playbackAborted: playbackAborted,
+            audioVideoSyncDiff: syncDiff,
+            hasAudioProgress: hasAudioProgress,
+            hasAudioCapability: hasAudioCapability
         )
 
         snapshotLock.lock()
