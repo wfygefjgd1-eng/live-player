@@ -182,25 +182,24 @@ struct ContentView: View {
                 }
                 .allowsHitTesting(false)
 
-                // 左上角常驻实时网速 + 切台反馈
-                // 注意：必须让徽章直接 @ObservedObject 观察 PlayerEngine，
-                // 否则它只会在 vm 的 @Published 变化（OSD/切台等）时被偶然重绘，
-                // 无法在每个 0.5s 采样点及时刷新 —— 这就是旧版网速"不实时"的根源。
+                // 左上角常驻状态区：网速恒显 + 加载/缓冲状态标识
+                // 网速徽标已经直接 @ObservedObject 观察 PlayerEngine，0.5s 采样即时刷新。
                 VStack(alignment: .leading, spacing: 6) {
+                    // 网速永远显示（含切换/缓冲时）——黑屏时也能看到来源是否在动
                     HStack {
                         NetworkSpeedBadge(player: vm.player)
                         Spacer(minLength: 0)
                     }
-                    // 切台中：左上角小徽标（转圈 + 网速 + 在加载），紧随网速下方
+                    // 状态行：加载中 / 缓冲中 —— 切台黑屏时用户能知道是加载还是卡了
                     HStack {
-                        SwitchingOverlay(player: vm.player)
+                        PlayerStatusBadge(player: vm.player)
                         Spacer(minLength: 0)
                     }
                     Spacer(minLength: 0)
                 }
                 .padding(.top, top + 4)
                 .padding(.leading, max(geo.safeAreaInsets.leading, 12) + 4)
-                .allowsHitTesting(false)      // 移除居中大块 SwitchingOverlay
+                .allowsHitTesting(false)      // 纯状态展示，不拦截手势
 
                 if vm.showDiagnosticsOverlay || vm.player.shouldShowDiagnostics {
                     VStack {
@@ -251,29 +250,20 @@ struct ContentView: View {
         (root as? FullScreenRootController)?.refreshSystemChrome()
     }
 
-    private static func speedText(_ speedKBps: Double) -> String {
-        if speedKBps >= 1024 { return String(format: "%.1f MB/s", speedKBps / 1024) }
-        if speedKBps > 0 { return String(format: "%.0f KB/s", speedKBps) }
-        return "--"
-    }
-
-    /// 切台中：左上角小徽标（小转圈 + 实时网速）。不再居中大块，避免挡住画面。
-    private struct SwitchingOverlay: View {
+    /// 播放状态徽标（左上角）：切台=「正在加载中」，否则若缓冲中=「正在缓冲中」。
+    /// 让用户在黑屏/切台时明确知道是加载、缓冲，还是来源真卡了（配合网速标识判断）。
+    private struct PlayerStatusBadge: View {
         @ObservedObject var player: PlayerEngine
 
         var body: some View {
-            if player.isSwitching {
-                HStack(spacing: 8) {
+            if let label = statusText {
+                HStack(spacing: 7) {
                     ProgressView()
                         .controlSize(.small)
                         .tint(.white)
-                    Text(speedText(player.observedSpeedKBps))
-                        .font(.system(size: 12, weight: .bold, design: .monospaced))
-                        .monospacedDigit()
-                        .foregroundColor(.white)
-                    Text("在加载")
+                    Text(label)
                         .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.white.opacity(0.8))
+                        .foregroundColor(.white.opacity(0.9))
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 7)
@@ -282,6 +272,17 @@ struct ContentView: View {
                 .overlay(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 0.5))
                 .allowsHitTesting(false)
             }
+        }
+
+        /// nil = 无需要提示的状态；否则返回显示文案。
+        /// 优先「正在加载」（切台/起播），其次「正在缓冲」（播放中卡顿无新进度）。
+        private var statusText: String? {
+            if player.isSwitching { return "正在加载" }
+            let t = player.diagnostics.timeControlStatus
+            if t == "缓冲中" { return "正在缓冲" }
+            // 起播阶段尚未出画（正在打开）
+            if t == "正在打开" && !player.isReady { return "正在加载" }
+            return nil
         }
     }
 
@@ -497,18 +498,17 @@ private struct NetworkSpeedBadge: View {
     @ObservedObject var player: PlayerEngine
 
     var body: some View {
-        // 切台/无有效速度时隐藏，避免闪烁显示 "--"；正常播放才常驻
-        if !player.isSwitching && player.observedSpeedKBps > 0 {
-            Text(text)
-                .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                .monospacedDigit()
-                .foregroundColor(.white)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(Color.black.opacity(0.55))
-                .clipShape(Capsule())
-                .overlay(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 0.5))
-        }
+        // 网速恒显：无论是否切换/缓冲/速度为 0，都显示（0 显示 --），
+        // 让用户时刻知道来源在不在传数据。
+        Text(text)
+            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+            .monospacedDigit()
+            .foregroundColor(.white)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Color.black.opacity(0.55))
+            .clipShape(Capsule())
+            .overlay(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 0.5))
     }
 
     private var text: String {
