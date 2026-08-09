@@ -119,6 +119,9 @@ final class PlayerEngine: ObservableObject {
     /// 转圈/起播缓冲阶段 accessLog 无实时事件，用缓冲增长×码率估算下载速度。
     private var lastBufferedEndAt: TimeInterval = -1
     private var lastBufferedSampleAt: Date = .distantPast
+    /// 转圈期间的缓冲峰值（只增不减）：缓冲秒数直播分片间隙会跳回 0，
+    /// 用峰值单调增长，稳定反映「缓冲在推进 = 正在下载」，不被「加载中」闪烁覆盖。
+    private var startupPeakBuffer: TimeInterval = 0
 
     @Published var isReady = false
     @Published var isPlaying = false
@@ -242,6 +245,7 @@ final class PlayerEngine: ObservableObject {
         lastAVSampleTime = .distantPast
         lastBufferedEndAt = -1
         lastBufferedSampleAt = .distantPast
+        startupPeakBuffer = 0
         // 启动 30 秒无声无画兜底看门狗（出画后 reportReady 会取消）
         startSilentStallWatchdog()
 
@@ -941,6 +945,15 @@ final class PlayerEngine: ObservableObject {
         lastBufferedEndAt = bufferedEnd
         lastBufferedSampleAt = now
 
+        // 转圈期间的缓冲峰值（只增不减）：直播分片间隙缓冲秒数会瞬时掉 0，
+        // 用峰值单调增长，UI 显示「缓冲 X.Xs」时稳定反映缓冲在推进（正在下载），
+        // 不会被分片间隙的瞬时 0 覆盖成「加载中」。出画（reportReady）后重置。
+        if !isReady {
+            if buffered > startupPeakBuffer {
+                startupPeakBuffer = buffered
+            }
+        }
+
         updateSpeed(rawKBps: speedKBps)
         let size = item.presentationSize
         let state = avStateText()
@@ -955,7 +968,7 @@ final class PlayerEngine: ObservableObject {
             videoWidth: Int(size.width),
             videoHeight: Int(size.height),
             stallCount: recentStalls.count,
-            bufferSeconds: buffered,
+            bufferSeconds: isReady ? buffered : startupPeakBuffer,
             timeControlStatus: state,
             waitingReason: avPlayer.timeControlStatus == .waitingToPlayAtSpecifiedRate
                 ? "AVPlayer 正在缓冲/等待数据" : "无",
