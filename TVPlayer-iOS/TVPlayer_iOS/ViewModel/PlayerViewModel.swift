@@ -1186,7 +1186,8 @@ final class PlayerViewModel: ObservableObject {
         currentSourceIndex = 0
         panelVisible = false
         autoSwitchState = .idle
-        playCurrent(resetTried: true)
+        // 用户主动选台：跳过线路预检，立即起播（消除 ~2s 探活延迟），同手动滑台。
+        playCurrent(resetTried: true, preflight: false)
     }
 
     /// 侧栏「第一个」展示位：始终把 CCTV1 顶到列表最前（不影响分组结构，仅浏览序）
@@ -1215,8 +1216,8 @@ final class PlayerViewModel: ObservableObject {
         currentSourceIndex = (currentSourceIndex + direction + ch.sourceCount) % ch.sourceCount
         triedLineIndices = [currentSourceIndex]
         showIndicator("切换线路 \(currentSourceIndex + 1)/\(ch.sourceCount)")
-        // 勿 resetTried：保留手动选的线路索引
-        playCurrent(showOSD: true, resetTried: false)
+        // 用户主动换线路：跳过预检立即起播（消除 ~2s 探活延迟）；勿 resetTried 保留手动选线
+        playCurrent(showOSD: true, resetTried: false, preflight: false)
     }
 
     // MARK: - UI 辅助
