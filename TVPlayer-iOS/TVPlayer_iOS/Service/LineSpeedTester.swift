@@ -121,10 +121,11 @@ final class LineSpeedTester {
                 bytes.task.cancel()
                 return nil
             }
-            // 精确累计收到的字节数，直到预算时间到即停
+            // 精确累计收到的字节数，直到预算时间到即停。URLSession.AsyncBytes 元素是 UInt8，
+            // 逐字节计数即可（预算内循环，开销可忽略）。
             var received = 0
-            for try await chunk in bytes {
-                received += chunk.count
+            for _ in bytes {
+                received += 1
                 if Date().timeIntervalSince(start) >= budget { break }
             }
             bytes.task.cancel()
