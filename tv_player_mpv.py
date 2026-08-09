@@ -18,7 +18,7 @@ FAVORITES_FILE = CONFIG_DIR / "favorites.json"
 HIDDEN_FILE = CONFIG_DIR / "hidden.json"
 
 DEFAULT_SOURCES = [
-    {"name": "best-fan", "url": "https://raw.githubusercontent.com/best-fan/iptv-sources/main/cn_all.m3u8"},
+    {"name": "今日精选源·2026-08-08", "url": "https://raw.githubusercontent.com/wfygefjgd1-eng/live-player/main/iptv-mirrors/validated-channels-2026-08-08.m3u"},
     {"name": "TVBox", "url": "https://ghfast.top/raw.githubusercontent.com/Supprise0901/TVBox_live/main/live.txt"},
     {"name": "vbskycn", "url": "https://raw.githubusercontent.com/vbskycn/iptv/master/tv/tv.m3u"},
     {"name": "fanmingming", "url": "https://raw.githubusercontent.com/fanmingming/live/main/tv/m3u/ipv6.m3u"},

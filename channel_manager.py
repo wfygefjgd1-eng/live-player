@@ -48,7 +48,7 @@ class ChannelManager:
     
     # 预置的直播源列表
     SOURCE_URLS = [
-        "https://raw.githubusercontent.com/best-fan/iptv-sources/main/cn_all.m3u8",
+        "https://raw.githubusercontent.com/wfygefjgd1-eng/live-player/main/iptv-mirrors/validated-channels-2026-08-08.m3u",
         "https://raw.githubusercontent.com/Supprise0901/TVBox_live/main/live.txt",
         "https://raw.githubusercontent.com/vbskycn/iptv/master/tv/tv.m3u",
     ]

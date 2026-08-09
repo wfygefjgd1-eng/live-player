@@ -90,8 +90,8 @@ buildozer android debug
 
 ## 默认源
 
-- 默认源：`best-fan cn_all_status.m3u8`
-- 默认源保留 GitHub 镜像兜底
+- 默认源：今日精选源 `validated-channels-2026-08-08.m3u`（origin 仓库 wfygefjgd1-eng）
+- 默认源保留 jsDelivr / Pages / raw 多镜像兜底
 - 也支持手动添加和切换自定义源
 
 ## 免责声明

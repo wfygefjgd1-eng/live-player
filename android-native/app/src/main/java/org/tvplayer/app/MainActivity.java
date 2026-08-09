@@ -58,20 +58,20 @@ public class MainActivity extends AppCompatActivity {
 
     // 默认源：本仓库严格筛选 validated-channels（拉取时 MirrorResolver 扩镜像竞速）
     private static final String DEFAULT_SOURCE_URL =
-            "https://cdn.jsdelivr.net/gh/wfygefjgd/live-player@main/iptv-mirrors/validated-channels.m3u";
+            "https://cdn.jsdelivr.net/gh/wfygefjgd1-eng/live-player@main/iptv-mirrors/validated-channels-2026-08-08.m3u";
 
-    // 预置 M3U 源（与 iOS PRESET_SOURCES 对齐）
+    // 预置 M3U 源（与 iOS PRESET_SOURCES 对齐，均指向 origin 仓库 wfygefjgd1-eng）
     private static final String[] MULTI_SOURCE_URLS = {
-            "https://cdn.jsdelivr.net/gh/wfygefjgd/live-player@main/iptv-mirrors/validated-channels.m3u",
-            "https://fastly.jsdelivr.net/gh/wfygefjgd/live-player@main/iptv-mirrors/validated-channels.m3u",
-            "https://wfygefjgd.github.io/live-player/iptv-mirrors/validated-channels.m3u",
-            "https://raw.githubusercontent.com/wfygefjgd/live-player/main/iptv-mirrors/validated-channels.m3u",
+            "https://cdn.jsdelivr.net/gh/wfygefjgd1-eng/live-player@main/iptv-mirrors/validated-channels-2026-08-08.m3u",
+            "https://fastly.jsdelivr.net/gh/wfygefjgd1-eng/live-player@main/iptv-mirrors/validated-channels-2026-08-08.m3u",
+            "https://wfygefjgd1-eng.github.io/live-player/iptv-mirrors/validated-channels-2026-08-08.m3u",
+            "https://raw.githubusercontent.com/wfygefjgd1-eng/live-player/main/iptv-mirrors/validated-channels-2026-08-08.m3u",
             "https://raw.githubusercontent.com/Guovin/iptv-api/gd/output/result.m3u",
             "https://raw.githubusercontent.com/vbskycn/iptv/master/tv/iptv4.m3u",
             "https://raw.githubusercontent.com/fanmingming/live/main/tv/m3u/ipv6.m3u",
-            "https://wfygefjgd.github.io/live-player/iptv-mirrors/burningc4-chinese-iptv.m3u",
-            "https://wfygefjgd.github.io/live-player/iptv-mirrors/zbefine-iptv.m3u",
-            "https://wfygefjgd.github.io/live-player/iptv-mirrors/suxuang-myiptv.m3u"
+            "https://wfygefjgd1-eng.github.io/live-player/iptv-mirrors/burningc4-chinese-iptv.m3u",
+            "https://wfygefjgd1-eng.github.io/live-player/iptv-mirrors/zbefine-iptv.m3u",
+            "https://wfygefjgd1-eng.github.io/live-player/iptv-mirrors/suxuang-myiptv.m3u"
     };
 
     private static final long CHANNEL_OSD_MS = 2500L;

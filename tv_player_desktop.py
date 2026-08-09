@@ -35,14 +35,15 @@ except ImportError as e:
 # =============================================================================
 # 常量 — 与 MainActivity.java 一致
 # =============================================================================
+SOURCE_FILENAME = "validated-channels-2026-08-08.m3u"
 DEFAULT_SOURCE_URL = (
-    "https://raw.githubusercontent.com/best-fan/iptv-sources/master/cn_all_status.m3u8"
+    f"https://raw.githubusercontent.com/wfygefjgd1-eng/live-player/main/iptv-mirrors/{SOURCE_FILENAME}"
 )
 DEFAULT_MIRRORS = [
     DEFAULT_SOURCE_URL,
-    "https://ghfast.top/raw.githubusercontent.com/best-fan/iptv-sources/master/cn_all_status.m3u8",
-    "https://raw.gitmirror.com/best-fan/iptv-sources/master/cn_all_status.m3u8",
-    "https://raw.kkgithub.com/best-fan/iptv-sources/master/cn_all_status.m3u8",
+    f"https://cdn.jsdelivr.net/gh/wfygefjgd1-eng/live-player@main/iptv-mirrors/{SOURCE_FILENAME}",
+    f"https://fastly.jsdelivr.net/gh/wfygefjgd1-eng/live-player@main/iptv-mirrors/{SOURCE_FILENAME}",
+    f"https://wfygefjgd1-eng.github.io/live-player/iptv-mirrors/{SOURCE_FILENAME}",
 ]
 CHANNEL_OSD_MS = 2500
 CHANNEL_SWITCH_TIMEOUT_MS = 4000

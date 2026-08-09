@@ -34,45 +34,52 @@ HIDDEN_LINES_FILE = CONFIG_DIR / "hidden_lines.json"
 FAVORITES_FILE = CONFIG_DIR / "favorites.json"
 HIDDEN_CHANNELS_FILE = CONFIG_DIR / "hidden.json"
 
-# Android DEFAULT_SOURCE_URL + DEFAULT_MIRRORS
+# 与 iOS/Android 对齐的默认源（origin 仓库 wfygefjgd1-eng 的今日精选源）
+SOURCE_FILENAME = "validated-channels-2026-08-08.m3u"
 DEFAULT_SOURCE_URL = (
-    "https://raw.githubusercontent.com/best-fan/iptv-sources/master/cn_all_status.m3u8"
+    f"https://raw.githubusercontent.com/wfygefjgd1-eng/live-player/main/iptv-mirrors/{SOURCE_FILENAME}"
 )
 
-# 预置源列表（Android 默认 + 桌面历史常用源，源管理里可切换）
+# 预置源列表（与 iOS PRESET_SOURCES 对齐，源管理里可切换）
 PRESET_SOURCES = [
     {
-        "name": "默认源 (best-fan 状态检测)",
+        "name": "今日精选源·2026-08-08",
         "url": DEFAULT_SOURCE_URL,
         "builtin": True,
     },
     {
-        "name": "best-fan 全量",
-        "url": "https://raw.githubusercontent.com/best-fan/iptv-sources/main/cn_all.m3u8",
+        "name": "今日精选源·jsDelivr",
+        "url": f"https://cdn.jsdelivr.net/gh/wfygefjgd1-eng/live-player@main/iptv-mirrors/{SOURCE_FILENAME}",
         "builtin": True,
     },
     {
-        "name": "TVBox",
-        "url": "https://ghfast.top/raw.githubusercontent.com/Supprise0901/TVBox_live/main/live.txt",
+        "name": "今日精选源·Pages",
+        "url": f"https://wfygefjgd1-eng.github.io/live-player/iptv-mirrors/{SOURCE_FILENAME}",
         "builtin": True,
     },
     {
-        "name": "vbskycn",
-        "url": "https://raw.githubusercontent.com/vbskycn/iptv/master/tv/tv.m3u",
+        "name": "Guovin 自动筛选源",
+        "url": "https://raw.githubusercontent.com/Guovin/iptv-api/gd/output/result.m3u",
         "builtin": True,
     },
     {
-        "name": "fanmingming IPv6",
+        "name": "vbskycn 双栈源",
+        "url": "https://raw.githubusercontent.com/vbskycn/iptv/master/tv/iptv4.m3u",
+        "builtin": True,
+    },
+    {
+        "name": "fanmingming IPv6 源",
         "url": "https://raw.githubusercontent.com/fanmingming/live/main/tv/m3u/ipv6.m3u",
         "builtin": True,
     },
 ]
 
+# 默认源候选（与 iOS LATEST_LINEUP_URLS 一致：raw → jsDelivr → Fastly → Pages）
 DEFAULT_MIRRORS = [
-    DEFAULT_SOURCE_URL,
-    "https://ghfast.top/raw.githubusercontent.com/best-fan/iptv-sources/master/cn_all_status.m3u8",
-    "https://raw.gitmirror.com/best-fan/iptv-sources/master/cn_all_status.m3u8",
-    "https://raw.kkgithub.com/best-fan/iptv-sources/master/cn_all_status.m3u8",
+    f"https://raw.githubusercontent.com/wfygefjgd1-eng/live-player/main/iptv-mirrors/{SOURCE_FILENAME}",
+    f"https://cdn.jsdelivr.net/gh/wfygefjgd1-eng/live-player@main/iptv-mirrors/{SOURCE_FILENAME}",
+    f"https://fastly.jsdelivr.net/gh/wfygefjgd1-eng/live-player@main/iptv-mirrors/{SOURCE_FILENAME}",
+    f"https://wfygefjgd1-eng.github.io/live-player/iptv-mirrors/{SOURCE_FILENAME}",
 ]
 
 MIRROR_PREFIXES = [
@@ -379,7 +386,7 @@ def source_display_name(url: str) -> str:
         if p["url"] == url:
             return p["name"]
     if url == DEFAULT_SOURCE_URL:
-        return "默认源 (best-fan 状态检测)"
+        return "今日精选源·2026-08-08"
     if len(url) > 64:
         return url[:61] + "..."
     return url

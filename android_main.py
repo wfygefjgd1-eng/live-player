@@ -28,7 +28,7 @@ from kivy.graphics import Color, Rectangle
 Window.clearcolor = (0, 0, 0, 1)
 
 DEFAULT_SOURCES = [
-    ("best-fan", "https://raw.githubusercontent.com/best-fan/iptv-sources/main/cn_all.m3u8"),
+    ("今日精选源·2026-08-08", "https://raw.githubusercontent.com/wfygefjgd1-eng/live-player/main/iptv-mirrors/validated-channels-2026-08-08.m3u"),
     ("TVBox", "https://ghfast.top/raw.githubusercontent.com/Supprise0901/TVBox_live/main/live.txt"),
     ("vbskycn", "https://raw.githubusercontent.com/vbskycn/iptv/master/tv/tv.m3u"),
     ("fanmingming", "https://raw.githubusercontent.com/fanmingming/live/main/tv/m3u/ipv6.m3u"),

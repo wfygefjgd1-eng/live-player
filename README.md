@@ -4,7 +4,7 @@ Python 桌面版对齐 Android 原生逻辑（同名折叠、多线路、自动�
 
 ## 功能（与 Android 原生一致）
 
-- 默认源：`best-fan cn_all_status.m3u8`（含 GitHub 镜像兜底）
+- 默认源：今日精选源 `validated-channels-2026-08-08.m3u`（origin 仓库 wfygefjgd1-eng，含 jsDelivr / Pages / raw 镜像兜底）
 - 同名频道折叠为一个列表项，内部保留多条线路
 - 左右方向键：切换当前频道线路
 - 上下方向键：切换频道
