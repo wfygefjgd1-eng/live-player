@@ -20,7 +20,9 @@ final class PlayerEngine: ObservableObject {
     static let startupHardTimeoutNs: UInt64 = 12_000_000_000
     /// 出画后保护：此期间禁止因软问题换线
     static let readyProtectNs: UInt64 = 4_000_000_000
-    static let progressStallThreshold: TimeInterval = 12.0
+    /// 连续缓冲卡顿阈值（秒）：画面冻结累计这么久才确认卡顿。原 12s 太保守——
+    /// 配合旧网速门（网速>0即判流动）导致卡断也不切。缩到 6s：激进但仍有防误切余量。
+    static let progressStallThreshold: TimeInterval = 6.0
 
     /// 内核差异化超时：官方 AVPlayer 原生快，少等（20s）；mpv 需多等（35s）；
     /// 慢 HLS 长分片源（如 264788）单独放宽（50s）。避免「固定短超时」误砍慢内核。
@@ -518,36 +520,28 @@ final class PlayerEngine: ObservableObject {
     }
 
     /// 当前是否有「声画在流动」。（Viewer 用于自动换线前的复核：若仍正常播放则取消误切）
-    /// 判定放宽：不苛求「此刻恰好 playing」——瞬时抖动下 timeControlStatus 会短暂读成
-    /// 缓冲中，但画面/声音其实还在。只要「缓冲有数据 或 网速在流动」+ 画面尺寸就绪即可。
-    /// - AVPlayer：缓冲充足 或 网速>0，且尺寸就绪；状态非暂停即可
+    /// 判定看「画面/声音实际在动」，不再以网速>0 当流动证据：
+    /// 卡顿时（源仍传数据、网速>0）画面冻结，若用网速判定会误判为「正常流动」→ 永不切换。
+    /// - AVPlayer：缓冲充足且可播放（isPlaybackLikelyToKeepUp），画面尺寸就绪，非暂停
     /// - mpv：已出画 + 未 paused-for-cache（缓存有数据）
     func isAudioVideoFlowing() -> Bool {
         guard isReady else { return false }
         if activeBackend == .mpv {
             let sample = mpvEngine.diagnosticsSample()
+            // mpv 卡顿的直接证据是 paused-for-cache（画面暂停等缓存）：
+            // 只要在缓冲中就不算流动，即使缓存里有数据（解码跟不上也卡）。
             return sample.hasVideoOutput
                 && sample.width > 0 && sample.height > 0
-                && !isMPVStalled
+                && sample.stateText != "缓冲中"
         } else {
             guard let item = avItem else { return false }
             let size = item.presentationSize
             let state = avStateText()
             // 画面尺寸就绪 + 非暂停（缓冲中/播放中皆可）
             guard size.width > 1, size.height > 1, state != "暂停" else { return false }
-            // 缓冲有数据，或网速在流动（网络在灌 = 源活着，即使瞬时缓冲也视为流动）
-            let bufferedOK = !item.isPlaybackBufferEmpty && item.isPlaybackLikelyToKeepUp
-            let networkOK = observedSpeedKBps > 0
-            return bufferedOK || networkOK
+            // 缓冲充足且可播放 = 画面实际在推进；不把网速>0 当流动证据（卡顿时网速可能仍>0）
+            return !item.isPlaybackBufferEmpty && item.isPlaybackLikelyToKeepUp
         }
-    }
-
-    /// mpv 是否陷入无缓存停滞（paused-for-cache 且无网络流动）
-    private var isMPVStalled: Bool {
-        let sample = mpvEngine.diagnosticsSample()
-        return sample.stateText == "缓冲中"
-            && sample.cacheSpeedKBps <= 0
-            && observedSpeedKBps <= 0
     }
 
     /// 网速是否持续达标（≥ threshold KB/s）——「源还活着」的硬证据。

@@ -1019,63 +1019,58 @@ final class PlayerViewModel: ObservableObject {
         // 证据驱动失败 / 硬兜底：仍无画面
         guard lineTimeoutEnabled, !userPaused, !panelVisible else { return }
         if player.isReady || playbackStable { return }
+        // 起播慢不等于坏线：保留网速门防误切（可能只是起播较慢）
         autoSwitchLine(hint: "线路不可用", reason: .noData)
     }
     private func onLowSpeed(_ reason: String) {
-        // 仅引擎多信号确认后的无数据；画面仍在播则忽略
+        // 播放中已累计 12s 持续缓冲（画面冻结、无数据推进）——强确认卡顿。
+        // 不再走网速门：卡顿时源可能仍在传（网速>0）但画面跟不上，网速门会误挡。
         guard lineTimeoutEnabled, !userPaused, !panelVisible else { return }
-        autoSwitchLine(hint: reason, reason: .noData)
+        autoSwitchLine(hint: reason, reason: .noData, strongConfirm: true)
     }
 
     /// 自动换线必要条件（仅下列确认坏线才切）
     /// 1. hardFail  播放器错误
     /// 2. noData    起播无画面 / 无网 / 长时间无数据且画面不动
-    /// 3. noAudio   已出画且确认无音轨（可被冷却挡住）
     /// 明确不切：单纯卡顿、缓冲、健康度 warning、用户暂停、侧栏打开
     private enum FailReason {
         case hardFail
         case noData
-        case noAudio
 
         var isConfirmedBad: Bool { true }
     }
 
     /// 自动切线：只响应确认坏线事件；下一条统一走 playLineLoop（预检+黑名单）
-    private func autoSwitchLine(hint: String, reason: FailReason) {
+    /// - strongConfirm：true 表示已在引擎层充分确认卡顿（如持续缓冲 6s），
+    ///   跳过网速门直接切换，避免「源仍在传数据但画面跟不上」的卡顿被网速门误挡。
+    private func autoSwitchLine(hint: String, reason: FailReason, strongConfirm: Bool = false) {
         guard lineTimeoutEnabled else { return }
         if panelVisible { return }
         guard let ch = currentChannel else {
             showIndicator(hint)
             return
         }
-        if reason == .noAudio { return }
         if autoSwitchState == .cooldown, !autoAdvanceOnExhaustion { return }
 
         if autoSwitchState == .cooldown {
-            switch reason {
-            case .hardFail, .noData:
-                cooldownTask?.cancel()
-                autoSwitchState = .idle
-            case .noAudio:
-                return
-            }
+            cooldownTask?.cancel()
+            autoSwitchState = .idle
         }
         // AVPlayer may report status, error-log and end-time failures for one item.
         // Keep one automatic switch transaction in flight until its preflight ends.
         if autoSwitchState == .switching { return }
 
-        // 误切复核（两层）：
-        // 1) 声画在流动（放宽判定）→ 不切（hardFail 和 noData 都适用：画面动了别切）
-        // 2) 网速 ≥ 200KB/s → 不切（仅 .noData/低速类。源在传数据的硬证据）
-        //    画面和声音都出来了，网速必已超 200KB → 线路是活的，不该切。
-        //    真失败(hardFail)时下一条已真正停，声画检查会放行；网速暂不参与 hardFail
-        //    以免「快网 + 源真 404」时被残存缓冲误挡。
+        // 误切复核：
+        // 1) 声画在流动（画面实际推进）→ 不切。判定看画面不看网速：卡顿时画面冻结，
+        //    即使网速>0 也不算流动（isAudioVideoFlowing 已去掉网速证据）。
+        // 2) strongConfirm（持续缓冲 6s 的强确认）→ 跳过网速门，直接切换。
+        // 3) 非强确认（起播慢等）且网速 ≥ 200KB/s → 不切（源还在传数据的硬证据）。
         if player.isReady {
             if player.isAudioVideoFlowing() {
                 showIndicator("画面/声音正常，已取消自动切换")
                 return
             }
-            if reason != .hardFail {
+            if !strongConfirm, reason != .hardFail {
                 let speedGateKBps = 200.0
                 if player.isNetworkFlowing(aboveKBps: speedGateKBps) {
                     showIndicator("网速正常，已取消自动切换")
