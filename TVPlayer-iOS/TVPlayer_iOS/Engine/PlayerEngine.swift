@@ -897,9 +897,11 @@ final class PlayerEngine: ObservableObject {
         }
         lastAVTotalBytes = Int64(totalBytes)
         lastAVSampleTime = now
-        // 分片边界重置累计计数器时（新分片字节数比上次小），退化为短窗均值兜底
+        // 分片边界重置累计计数器时（新分片字节数比上次小），退化为短窗均值兜底。
+        // transferDuration 上限放宽到 15s：直播长分片源（慢 HLS）单分片传输可能超 5s，
+        // 原 <5 会把起播/缓冲阶段的下载速度排除，导致转圈时网速显示为 0。
         let transferDuration = event?.transferDuration ?? 0
-        let shortAvgKBps = transferDuration > 0.05 && transferDuration < 5
+        let shortAvgKBps = transferDuration > 0.05 && transferDuration < 15
             ? (Double(event?.numberOfBytesTransferred ?? 0)) / 1024 / transferDuration : 0
         let fallbackKBps = (event?.observedBitrate ?? 0) > 0 ? (event?.observedBitrate ?? 0) / 8 / 1024 : 0
         updateSpeed(rawKBps: instantKBps > 0 ? instantKBps : (shortAvgKBps > 0 ? shortAvgKBps : fallbackKBps))

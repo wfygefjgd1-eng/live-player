@@ -518,6 +518,14 @@ private struct NetworkSpeedBadge: View {
         if player.observedSpeedKBps > 0 {
             return String(format: "%.0f KB/s", player.observedSpeedKBps)
         }
+        // 转圈/缓冲中：即使瞬时网速为 0（分片下载间隙），也显示加载反馈，
+        // 让用户知道在加载而非卡死。否则切台转圈时网速一直显示 "--"。
+        if player.isSwitching {
+            return "连接中…"
+        }
+        if player.diagnostics.timeControlStatus == "缓冲中" {
+            return "缓冲中…"
+        }
         return "--"
     }
 }
