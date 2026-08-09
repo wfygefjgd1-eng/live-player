@@ -88,6 +88,8 @@ final class PlayerEngine: ObservableObject {
     private var playStartedAt: Date = .distantPast
     /// 30 秒无声无画兜底看门狗
     private var silentStallTask: Task<Void, Never>?
+    /// 起播转圈网速探测任务：切台后并行测源实际下载速度，出画前填充 observedSpeedKBps
+    private var startupSpeedProbeTask: Task<Void, Never>?
     private var currentURLString = ""
     private var recentStalls: [Date] = []
     private var lastStallAt: Date = .distantPast
@@ -238,6 +240,13 @@ final class PlayerEngine: ObservableObject {
         lastAVSampleTime = .distantPast
         // 启动 30 秒无声无画兜底看门狗（出画后 reportReady 会取消）
         startSilentStallWatchdog()
+
+        // 起播转圈时显示真实下载速度：AVPlayer accessLog 在起播缓冲期无实时事件，
+        // 网速会显示 0。此处并行做一次轻量下载测速（预算 0.7s），把测得的
+        // 「起播探测速度」填入 observedSpeedKBps —— 转圈时用户能看到数字在动，
+        // 出画后由真实采样覆盖。预检已在 playLineLoop 里做过，探测是善意的二次请求，
+        // 只发生在起播一瞬且立即取消。
+        startStartupSpeedProbe(url: url, token: token)
 
         if Self.requiresMPV(url) {
             // 已知 AVPlayer 无法处理：直接 mpv，不再先试 AVPlayer
@@ -426,6 +435,8 @@ final class PlayerEngine: ObservableObject {
         mpvStartupTask = nil
         avStartupTask?.cancel()
         avStartupTask = nil
+        startupSpeedProbeTask?.cancel()
+        startupSpeedProbeTask = nil
         // 已出画，取消 30s 兜底看门狗
         cancelSilentStallWatchdog()
         isPlaying = true
@@ -565,6 +576,22 @@ final class PlayerEngine: ObservableObject {
         silentStallTask = nil
     }
 
+    /// 起播转圈网速探测：切台后并行下载源前若干 KB 测速，把测得速度填入
+    /// observedSpeedKBps，直到出画由真实采样覆盖。仅用于转圈反馈——若探测失败
+    /// 则保持现状（加载态），不谎报数字。出画（reportReady）或再次切台会取消。
+    private func startStartupSpeedProbe(url: URL, token: Int) {
+        startupSpeedProbeTask?.cancel()
+        startupSpeedProbeTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let speed = await LineSpeedTester.shared.probeDownloadSpeed(url.absoluteString)
+            guard !Task.isCancelled, self.playToken == token, !self.isReady else { return }
+            if let speed, speed > 0 {
+                // 此刻仍在起播（未出画）：显示探测到的下载速度；出画后真实采样会覆盖
+                self.updateSpeed(rawKBps: speed)
+            }
+        }
+    }
+
     /// Re-arm line monitoring when the setting changes during playback.
     func setLineTimeoutEnabled(_ enabled: Bool) {
         lineTimeoutEnabled = enabled
@@ -667,6 +694,8 @@ final class PlayerEngine: ObservableObject {
         mpvStartupTask = nil
         avStartupTask?.cancel()
         avStartupTask = nil
+        startupSpeedProbeTask?.cancel()
+        startupSpeedProbeTask = nil
         cancelAllTasks()
         stopStallCheck()
         diagnosticsTask?.cancel()
@@ -882,10 +911,13 @@ final class PlayerEngine: ObservableObject {
         guard let item = avItem else { return }
         let log = item.accessLog()
         let event = log?.events.last
-        // 实时网速：对 AVPlayer 的累计已传输字节数做差分（本次采样 - 上次采样）/ 时间差。
-        // 这才是真正的「瞬时」下载速度；而 event.transferDuration / numberOfBytesTransferred
-        // 是从分片开始到现在的累计均值，直播中网络一波动该均值几乎不动，导致网速「不实时」。
+        // 实时网速：优先用字节差分取「瞬时」下载速度；转圈/起播阶段差分尚不可用
+        // （accessLog event 未积累）时，退化为累计平均下载速率 bytes/duration——
+        // 流开始下载后即有值，让切台转圈时就能看到真实下载速度在动。
+        let transferDuration = event?.transferDuration ?? 0
         let totalBytes = Double(event?.numberOfBytesTransferred ?? 0)
+        let avgDownloadKBps = transferDuration > 0.05
+            ? totalBytes / 1024 / transferDuration : 0
         let now = Date()
         var instantKBps = 0.0
         if totalBytes >= Double(lastAVTotalBytes), lastAVSampleTime != .distantPast {
@@ -898,13 +930,15 @@ final class PlayerEngine: ObservableObject {
         lastAVTotalBytes = Int64(totalBytes)
         lastAVSampleTime = now
         // 分片边界重置累计计数器时（新分片字节数比上次小），退化为短窗均值兜底。
-        // transferDuration 上限放宽到 15s：直播长分片源（慢 HLS）单分片传输可能超 5s，
-        // 原 <5 会把起播/缓冲阶段的下载速度排除，导致转圈时网速显示为 0。
-        let transferDuration = event?.transferDuration ?? 0
-        let shortAvgKBps = transferDuration > 0.05 && transferDuration < 15
-            ? (Double(event?.numberOfBytesTransferred ?? 0)) / 1024 / transferDuration : 0
+        // transferDuration 上限放宽到 15s：直播长分片源（慢 HLS）单分片传输可能超 5s。
+        let shortAvgKBps = (transferDuration > 0.05 && transferDuration < 15)
+            ? totalBytes / 1024 / transferDuration : 0
         let fallbackKBps = (event?.observedBitrate ?? 0) > 0 ? (event?.observedBitrate ?? 0) / 8 / 1024 : 0
-        updateSpeed(rawKBps: instantKBps > 0 ? instantKBps : (shortAvgKBps > 0 ? shortAvgKBps : fallbackKBps))
+        // 优先级：差分瞬时 > 短窗均值 > 累计平均下载速率 > 码率兜底。
+        let speedKBps = instantKBps > 0 ? instantKBps
+            : (shortAvgKBps > 0 ? shortAvgKBps
+                : (avgDownloadKBps > 0 ? avgDownloadKBps : fallbackKBps))
+        updateSpeed(rawKBps: speedKBps)
         let bitrate = event?.indicatedBitrate ?? 0
         let size = item.presentationSize
         let ranges = item.loadedTimeRanges

@@ -512,19 +512,17 @@ private struct NetworkSpeedBadge: View {
     }
 
     private var text: String {
+        // 网速恒显：优先真实下载速度。转圈/缓冲阶段也显示数字（累计平均下载速率），
+        // 不显示占位文案——让用户看到切台后真的在下载。只为 0 时回退到加载态。
         if player.observedSpeedKBps >= 1024 {
             return String(format: "%.1f MB/s", player.observedSpeedKBps / 1024)
         }
         if player.observedSpeedKBps > 0 {
             return String(format: "%.0f KB/s", player.observedSpeedKBps)
         }
-        // 转圈/缓冲中：即使瞬时网速为 0（分片下载间隙），也显示加载反馈，
-        // 让用户知道在加载而非卡死。否则切台转圈时网速一直显示 "--"。
+        // 转圈且瞬时 0（极早期 + 分片间隙）：仍给加载态反馈，避免显示静止 "--" 疑似卡死。
         if player.isSwitching {
-            return "连接中…"
-        }
-        if player.diagnostics.timeControlStatus == "缓冲中" {
-            return "缓冲中…"
+            return "加载中…"
         }
         return "--"
     }
