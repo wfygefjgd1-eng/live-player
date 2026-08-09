@@ -101,39 +101,4 @@ final class LineSpeedTester {
         cache.removeAll()
         hardFailCache.removeAll()
     }
-
-    /// 起播转圈时显示真实下载速度：下载源前若干 KB 测速（预算内即停）。
-    /// 返回 KB/s；失败返回 nil（上层显示加载态，不谎报数字）。
-    /// 与 quickPreflight 不同：quickPreflight 是 bytes=0-1 探活拿不到速度；
-    /// 此方法真实读响应体字节测下载速率，反映「源在努力联网」。
-    /// 一次性、随即取消，避免泄漏连接。
-    func probeDownloadSpeed(_ url: String, budget: TimeInterval = 0.7) async -> Double? {
-        guard let u = URL(string: url), let scheme = u.scheme?.lowercased(),
-              scheme == "http" || scheme == "https" else { return nil }
-        var req = URLRequest(url: u)
-        req.httpMethod = "GET"
-        req.timeoutInterval = budget + 0.5
-        req.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)", forHTTPHeaderField: "User-Agent")
-        let start = Date()
-        do {
-            let (bytes, resp) = try await session.bytes(for: req)
-            guard (resp as? HTTPURLResponse).map({ (200...399).contains($0.statusCode) }) ?? false else {
-                bytes.task.cancel()
-                return nil
-            }
-            // 精确累计收到的字节数，直到预算时间到即停。URLSession.AsyncBytes 元素是 UInt8
-            // 且是 async 序列（须用 for try await）。逐字节计数，预算内 break。
-            var received = 0
-            for try await _ in bytes {
-                received += 1
-                if Date().timeIntervalSince(start) >= budget { break }
-            }
-            bytes.task.cancel()
-            let interval = Date().timeIntervalSince(start)
-            guard interval > 0.05, received > 0 else { return nil }
-            return Double(received) / 1024 / interval
-        } catch {
-            return nil
-        }
-    }
 }

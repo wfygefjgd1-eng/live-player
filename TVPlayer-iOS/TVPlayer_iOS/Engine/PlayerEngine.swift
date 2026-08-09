@@ -88,8 +88,6 @@ final class PlayerEngine: ObservableObject {
     private var playStartedAt: Date = .distantPast
     /// 30 秒无声无画兜底看门狗
     private var silentStallTask: Task<Void, Never>?
-    /// 起播转圈网速探测任务：切台后并行测源实际下载速度，出画前填充 observedSpeedKBps
-    private var startupSpeedProbeTask: Task<Void, Never>?
     private var currentURLString = ""
     private var recentStalls: [Date] = []
     private var lastStallAt: Date = .distantPast
@@ -117,6 +115,10 @@ final class PlayerEngine: ObservableObject {
     /// AVPlayer 累计字节追踪（用于计算真实瞬时下载速度）
     private var lastAVTotalBytes: Int64 = 0
     private var lastAVSampleTime: Date = .distantPast
+    /// 上次采样时的缓冲端点（loadedTimeRanges 末端），用于缓冲增长估速——
+    /// 转圈/起播缓冲阶段 accessLog 无实时事件，用缓冲增长×码率估算下载速度。
+    private var lastBufferedEndAt: TimeInterval = -1
+    private var lastBufferedSampleAt: Date = .distantPast
 
     @Published var isReady = false
     @Published var isPlaying = false
@@ -238,15 +240,10 @@ final class PlayerEngine: ObservableObject {
         observedSpeedKBps = 0
         lastAVTotalBytes = 0
         lastAVSampleTime = .distantPast
+        lastBufferedEndAt = -1
+        lastBufferedSampleAt = .distantPast
         // 启动 30 秒无声无画兜底看门狗（出画后 reportReady 会取消）
         startSilentStallWatchdog()
-
-        // 起播转圈时显示真实下载速度：AVPlayer accessLog 在起播缓冲期无实时事件，
-        // 网速会显示 0。此处并行做一次轻量下载测速（预算 0.7s），把测得的
-        // 「起播探测速度」填入 observedSpeedKBps —— 转圈时用户能看到数字在动，
-        // 出画后由真实采样覆盖。预检已在 playLineLoop 里做过，探测是善意的二次请求，
-        // 只发生在起播一瞬且立即取消。
-        startStartupSpeedProbe(url: url, token: token)
 
         if Self.requiresMPV(url) {
             // 已知 AVPlayer 无法处理：直接 mpv，不再先试 AVPlayer
@@ -435,8 +432,6 @@ final class PlayerEngine: ObservableObject {
         mpvStartupTask = nil
         avStartupTask?.cancel()
         avStartupTask = nil
-        startupSpeedProbeTask?.cancel()
-        startupSpeedProbeTask = nil
         // 已出画，取消 30s 兜底看门狗
         cancelSilentStallWatchdog()
         isPlaying = true
@@ -576,22 +571,6 @@ final class PlayerEngine: ObservableObject {
         silentStallTask = nil
     }
 
-    /// 起播转圈网速探测：切台后并行下载源前若干 KB 测速，把测得速度填入
-    /// observedSpeedKBps，直到出画由真实采样覆盖。仅用于转圈反馈——若探测失败
-    /// 则保持现状（加载态），不谎报数字。出画（reportReady）或再次切台会取消。
-    private func startStartupSpeedProbe(url: URL, token: Int) {
-        startupSpeedProbeTask?.cancel()
-        startupSpeedProbeTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            let speed = await LineSpeedTester.shared.probeDownloadSpeed(url.absoluteString)
-            guard !Task.isCancelled, self.playToken == token, !self.isReady else { return }
-            if let speed, speed > 0 {
-                // 此刻仍在起播（未出画）：显示探测到的下载速度；出画后真实采样会覆盖
-                self.updateSpeed(rawKBps: speed)
-            }
-        }
-    }
-
     /// Re-arm line monitoring when the setting changes during playback.
     func setLineTimeoutEnabled(_ enabled: Bool) {
         lineTimeoutEnabled = enabled
@@ -694,8 +673,6 @@ final class PlayerEngine: ObservableObject {
         mpvStartupTask = nil
         avStartupTask?.cancel()
         avStartupTask = nil
-        startupSpeedProbeTask?.cancel()
-        startupSpeedProbeTask = nil
         cancelAllTasks()
         stopStallCheck()
         diagnosticsTask?.cancel()
@@ -911,14 +888,20 @@ final class PlayerEngine: ObservableObject {
         guard let item = avItem else { return }
         let log = item.accessLog()
         let event = log?.events.last
-        // 实时网速：优先用字节差分取「瞬时」下载速度；转圈/起播阶段差分尚不可用
-        // （accessLog event 未积累）时，退化为累计平均下载速率 bytes/duration——
-        // 流开始下载后即有值，让切台转圈时就能看到真实下载速度在动。
+        // 缓冲端点与码率（起播解析 HLS 后即有）：缓冲增长估速需要它
+        let bitrate = event?.indicatedBitrate ?? 0
+        let ranges = item.loadedTimeRanges
+        let bufferedEnd = ranges.compactMap { value -> TimeInterval? in
+            let end = CMTimeGetSeconds(CMTimeRangeGetEnd(value.timeRangeValue))
+            return end.isFinite ? end : nil
+        }.max() ?? 0
+        let current = CMTimeGetSeconds(item.currentTime())
+        let buffered = max(0, bufferedEnd - (current.isFinite ? current : 0))
+        let now = Date()
         let transferDuration = event?.transferDuration ?? 0
         let totalBytes = Double(event?.numberOfBytesTransferred ?? 0)
         let avgDownloadKBps = transferDuration > 0.05
             ? totalBytes / 1024 / transferDuration : 0
-        let now = Date()
         var instantKBps = 0.0
         if totalBytes >= Double(lastAVTotalBytes), lastAVSampleTime != .distantPast {
             let dt = now.timeIntervalSince(lastAVSampleTime)
@@ -929,25 +912,32 @@ final class PlayerEngine: ObservableObject {
         }
         lastAVTotalBytes = Int64(totalBytes)
         lastAVSampleTime = now
-        // 分片边界重置累计计数器时（新分片字节数比上次小），退化为短窗均值兜底。
-        // transferDuration 上限放宽到 15s：直播长分片源（慢 HLS）单分片传输可能超 5s。
         let shortAvgKBps = (transferDuration > 0.05 && transferDuration < 15)
             ? totalBytes / 1024 / transferDuration : 0
         let fallbackKBps = (event?.observedBitrate ?? 0) > 0 ? (event?.observedBitrate ?? 0) / 8 / 1024 : 0
-        // 优先级：差分瞬时 > 短窗均值 > 累计平均下载速率 > 码率兜底。
-        let speedKBps = instantKBps > 0 ? instantKBps
+        // 差分瞬时 > 短窗均值 > 累计平均 > 码率兜底
+        var speedKBps = instantKBps > 0 ? instantKBps
             : (shortAvgKBps > 0 ? shortAvgKBps
                 : (avgDownloadKBps > 0 ? avgDownloadKBps : fallbackKBps))
+
+        // 转圈/起播缓冲阶段：accessLog 无实时事件（speedKBps 常为 0），
+        // 但缓冲 loadedTimeRanges 正在增长 = 网络在下载。用「缓冲增长内容秒数 ×
+        // 流码率」估算实时下载速度 —— 这是主播制下起播阶段唯一可靠、无需额外
+        // 请求的实时网速来源。缓冲端点前移即视为在下载，出画后 accessLog 接管。
+        if speedKBps <= 0, bitrate > 0, lastBufferedEndAt >= 0 {
+            let dt = now.timeIntervalSince(lastBufferedSampleAt)
+            let growth = bufferedEnd - lastBufferedEndAt
+            if growth > 0.05, dt > 0.1 {
+                // 内容秒/秒 × 码率(bps) / 8 = 字节/秒 → KB/s
+                let bufferKBps = (growth / dt) * bitrate / 8 / 1024
+                if bufferKBps > 0 { speedKBps = bufferKBps }
+            }
+        }
+        lastBufferedEndAt = bufferedEnd
+        lastBufferedSampleAt = now
+
         updateSpeed(rawKBps: speedKBps)
-        let bitrate = event?.indicatedBitrate ?? 0
         let size = item.presentationSize
-        let ranges = item.loadedTimeRanges
-        let bufferedEnd = ranges.compactMap { value -> TimeInterval? in
-            let end = CMTimeGetSeconds(CMTimeRangeGetEnd(value.timeRangeValue))
-            return end.isFinite ? end : nil
-        }.max() ?? 0
-        let current = CMTimeGetSeconds(item.currentTime())
-        let buffered = max(0, bufferedEnd - (current.isFinite ? current : 0))
         let state = avStateText()
         let videoTrack = item.tracks.first { $0.assetTrack?.mediaType == .video }?.assetTrack
 
