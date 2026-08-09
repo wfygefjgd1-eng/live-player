@@ -689,7 +689,7 @@ final class PlayerEngine: ObservableObject {
         avRenderedConsecutive = 0
         shouldShowDiagnostics = false
         diagnostics = PlaybackDiagnostics(
-            bufferSeconds: Self.initialBufferSeconds,
+            bufferSeconds: 0,
             engineName: activeEngineName
         )
         isReady = false
@@ -888,8 +888,13 @@ final class PlayerEngine: ObservableObject {
         guard let item = avItem else { return }
         let log = item.accessLog()
         let event = log?.events.last
-        // 缓冲端点与码率（起播解析 HLS 后即有）：缓冲增长估速需要它
-        let bitrate = event?.indicatedBitrate ?? 0
+        let videoTrack = item.tracks.first { $0.assetTrack?.mediaType == .video }?.assetTrack
+        // 码率来源：优先 accessLog 的流码率；起播转圈时 accessLog 尚无实时 event，
+        // 用 AVAssetTrack.estimatedDataRate（AVPlayer 解析出媒体轨道后即有，不依赖
+        // accessLog）兜底 —— 这样缓冲增长估速在转圈时也能算，网速徽标能显示数字。
+        let bitrate = (event?.indicatedBitrate ?? 0) > 0
+            ? Double(event?.indicatedBitrate ?? 0)
+            : Double(videoTrack?.estimatedDataRate ?? 0)
         let ranges = item.loadedTimeRanges
         let bufferedEnd = ranges.compactMap { value -> TimeInterval? in
             let end = CMTimeGetSeconds(CMTimeRangeGetEnd(value.timeRangeValue))
@@ -939,7 +944,6 @@ final class PlayerEngine: ObservableObject {
         updateSpeed(rawKBps: speedKBps)
         let size = item.presentationSize
         let state = avStateText()
-        let videoTrack = item.tracks.first { $0.assetTrack?.mediaType == .video }?.assetTrack
 
         diagnostics = PlaybackDiagnostics(
             observedBitrate: observedSpeedKBps * 1024 * 8,
