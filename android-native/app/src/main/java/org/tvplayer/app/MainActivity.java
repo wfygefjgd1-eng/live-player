@@ -230,6 +230,8 @@ public class MainActivity extends AppCompatActivity {
                         autoRecoverChannelHops = 0;
                         scheduleSilentAudioCheck();
                         scheduleRememberPreferredLine();
+                        // 声画已确认出画：此时才启动 OSD 隐藏倒计时（对齐 iOS「声画出来提示才消失」）
+                        scheduleOsdHide();
                     } else {
                         // 假 READY：不写成功信誉，继续等出画/超时
                         currentPlaybackReachedReady = false;
@@ -485,6 +487,11 @@ public class MainActivity extends AppCompatActivity {
         mainHandler.postDelayed(hideIndicatorRunnable, 1200);
     }
 
+    /**
+     * 切台时先显示「正在加载」OSD；出画（onPlaybackStateChanged READY + isPlaying）
+     * 后才转成频道名并启动 CHANNEL_OSD_MS 倒计时隐藏。这样「正在加载」提示
+     * 不会在声画真正出来前提前消失。对齐 iOS PlayerEngine.reportReady。
+     */
     private void showChannelOsd() {
         if (channels.isEmpty() || currentIndex < 0 || currentIndex >= channels.size()) {
             return;
@@ -496,6 +503,17 @@ public class MainActivity extends AppCompatActivity {
         }
         channelLabel.setText(text);
         channelLabel.setVisibility(View.VISIBLE);
+        // 未出画：保持可见，不启动隐藏倒计时（等 onPlaybackStateChanged 出画后 hideChannelOsdAfterReady）
+        if (currentPlaybackReachedReady) {
+            scheduleOsdHide();
+        }
+    }
+
+    /** 出画后：若 OSD 仍可见，启动 CHANNEL_OSD_MS 倒计时隐藏 */
+    private void scheduleOsdHide() {
+        if (channelLabel.getVisibility() != View.VISIBLE) {
+            return;
+        }
         if (hideChannelLabelRunnable != null) {
             mainHandler.removeCallbacks(hideChannelLabelRunnable);
         }

@@ -449,6 +449,10 @@ class MpvPlayer:
                 kw["creationflags"] = subprocess.CREATE_NO_WINDOW
             self.proc = subprocess.Popen(cmd, **kw)
             self.paused = False
+            # 起播前确保解除暂停：mpv --idle=yes 启动后是暂停空闲态，若上一会话
+            # 暂停过（cycle pause），新频道可能停在暂停（画面冻结、无声音），
+            # 必须显式解除暂停。对齐 iOS MPVPlaybackEngine.play 的 setFlagProperty("pause", false)。
+            self._ipc({"command": ["set_property", "pause", False]})
             return True
         except Exception:
             self.proc = None
@@ -1062,16 +1066,46 @@ class TVPlayerApp:
         if self._ready_id:
             self.root.after_cancel(self._ready_id)
 
+        # 「正在加载」的结束不再按固定 1200ms 关掉，而是跟随声画真实流动：
+        # 轮询 mpv time-pos 是否持续前进（= 音视频时钟在走，声画已出）。
+        # 与 _schedule_stall 的 is_stalled() 共享 _last_time_pos 会互相干扰，
+        # 故此处用独立的 last_pos 记录自己的推进。连续 3 拍（每 400ms）确认，
+        # 抗瞬时缓冲抖动。对齐 iOS PlayerEngine.reportReady 的 isAudioVideoFlowing。
+        # 若声画一直没出来，由 _schedule_stall 的超时兜底换线，不会无限转。
+        last_pos = [-1.0]
+        stable = [0]
+
         def mark():
             if token != self.playback_token:
                 return
-            if self.player.alive():
+            if not self.player.alive():
                 self.waiting_ready = False
-                self.auto_switching = False
                 self._cancel_stall()
-                self._flash_floats()
+                self.switch_next_line("当前线路播放失败，切换下一线路")
+                return
+            # 独立探测：time-pos 前进 = 声画时钟在走
+            tpos = self.player.get_property("time-pos")
+            if tpos is not None:
+                if last_pos[0] < 0:
+                    last_pos[0] = tpos
+                    stable[0] = 0
+                elif tpos > last_pos[0] + 0.1:
+                    last_pos[0] = tpos
+                    stable[0] += 1
+                else:
+                    stable[0] = 0
+                if stable[0] >= 3:
+                    self.waiting_ready = False
+                    self.auto_switching = False
+                    self._cancel_stall()
+                    self._flash_floats()
+                    return
+            else:
+                # time-pos 尚不可用（可能还在建立缓冲）：未确认，继续等
+                stable[0] = 0
+            self._ready_id = self.root.after(400, mark)
 
-        self._ready_id = self.root.after(1200, mark)
+        self._ready_id = self.root.after(400, mark)
 
     def _arm_watch(self, token: int):
         if self._watch_id:
