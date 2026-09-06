@@ -153,7 +153,8 @@ public class VideoListFragment extends Fragment {
                 if (!isAdded()) return;
                 swipe.setRefreshing(false);
                 tvEmpty.setVisibility(View.VISIBLE);
-                Toast.makeText(requireContext(), "加载失败: " + t.getMessage(), Toast.LENGTH_SHORT).show();
+                String msg = t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName();
+                Toast.makeText(requireContext(), "加载失败: " + msg, Toast.LENGTH_SHORT).show();
             }
         });
     }

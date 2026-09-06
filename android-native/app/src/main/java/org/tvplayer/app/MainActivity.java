@@ -665,16 +665,23 @@ public class MainActivity extends AppCompatActivity {
         cancelStallCheck();
 
         if (useCache) {
-            List<Channel> cached = storage.loadChannels();
-            final boolean hasCache = cached != null && !cached.isEmpty();
-            if (channels.isEmpty() && hasCache) {
-                channels.clear();
-                channels.addAll(cached);
-                reputation.applyToChannels(channels);
-                adapter.setData(channels);
-                restoreLastChannelPosition();
-                status.setText(String.format("已加载 %d 个频道（缓存）", channels.size()));
-                playCurrent(false, CHANNEL_SWITCH_TIMEOUT_MS);
+            // 缓存 JSON 可能有几千频道，解析放后台线程，结果回主线程后只在空列表时灌入
+            try {
+                netPool.execute(() -> {
+                    List<Channel> cached = storage.loadChannels();
+                    mainHandler.post(() -> {
+                        if (channels.isEmpty() && cached != null && !cached.isEmpty()) {
+                            channels.addAll(cached);
+                            reputation.applyToChannels(channels);
+                            adapter.setData(channels);
+                            restoreLastChannelPosition();
+                            status.setText(String.format("已加载 %d 个频道（缓存）", channels.size()));
+                            playCurrent(false, CHANNEL_SWITCH_TIMEOUT_MS);
+                        }
+                    });
+                });
+            } catch (Exception ignored) {
+                // 池已关闭（极端时序）时放弃缓存灌入
             }
         }
 
