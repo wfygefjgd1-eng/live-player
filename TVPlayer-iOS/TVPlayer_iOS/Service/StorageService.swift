@@ -73,7 +73,7 @@ final class StorageService {
         if !FileManager.default.fileExists(atPath: dir.path) {
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         }
-        let url = dir.appendingPathComponent("channels_cache.json")
+        var url = dir.appendingPathComponent("channels_cache.json")
         var values = URLResourceValues()
         values.isExcludedFromBackup = true
         try? url.setResourceValues(values)
