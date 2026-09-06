@@ -40,10 +40,41 @@ final class MPVPlaybackEngine {
     var onError: ((String) -> Void)?
     var onStateChanged: ((String) -> Void)?
 
-    private var mpv: OpaquePointer?
-    private var activeURL: URL?
-    private var stoppedByOwner = true
-    private var reportedPlaying = false
+    // MARK: - 共享状态（跨主线程 / 事件队列 / 采样队列三方访问，必须经 stateLock 读写）
+    // 裸 var 的跨线程读写是 Swift 数据竞争（UB，TSan 必报）；统一收敛到锁内。
+    // mpv 的 API 调用本身线程安全，需要保护的只有句柄与以下标志。
+    private let stateLock = NSLock()
+    private var _mpv: OpaquePointer?
+    private var _activeURL: URL?
+    private var _stoppedByOwner = true
+    private var _reportedPlaying = false
+    private var _samplerCancelled = true
+    private var _volumeState: Float = 1
+
+    private var mpv: OpaquePointer? {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _mpv }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _mpv = newValue }
+    }
+    private var activeURL: URL? {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _activeURL }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _activeURL = newValue }
+    }
+    private var stoppedByOwner: Bool {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _stoppedByOwner }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _stoppedByOwner = newValue }
+    }
+    private var reportedPlaying: Bool {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _reportedPlaying }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _reportedPlaying = newValue }
+    }
+    private var samplerCancelled: Bool {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _samplerCancelled }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _samplerCancelled = newValue }
+    }
+    private var volumeState: Float {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _volumeState }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _volumeState = newValue }
+    }
 
     // 事件循环：mpv 只允许单线程 wait_event，唤醒回调也只在此队列排队
     private let eventQueue = DispatchQueue(label: "tvplayer.mpv.events", qos: .userInitiated)
@@ -51,7 +82,6 @@ final class MPVPlaybackEngine {
     // 后台采样：避免在主线程触碰可能阻塞 demux 锁的 mpv 调用
     private let samplerQueue = DispatchQueue(label: "tvplayer.mpv.sampler", qos: .utility)
     private let snapshotLock = NSLock()
-    private var samplerCancelled = true
     private var lastSnapshot = DiagnosticsSample()
 
     // mpv 日志环形缓冲：Release 构建也能在诊断文本里看到关键错误（硬解失败/网络失败等）
@@ -119,72 +149,92 @@ final class MPVPlaybackEngine {
 
     func play(url: URL, drawable: UIView, volume: Float, softwareDecode: Bool) {
         stoppedByOwner = true
-        command("stop", args: [])
-
         reportedPlaying = false
         samplerCancelled = true
         snapshotLock.lock()
         lastSnapshot = DiagnosticsSample()
         snapshotLock.unlock()
-        activeURL = url
 
         logTailLock.lock()
         logTail.removeAll()
         logTailLock.unlock()
         captureLog("[app] loadfile \(url.absoluteString) softwareDecode=\(softwareDecode)\n")
 
-        guard let host = drawable as? MPVMetalHostView,
-              ensureMpvInitialized(layer: host.metalLayer) else {
+        guard let host = drawable as? MPVMetalHostView else {
             onError?("mpv 初始化失败")
             return
         }
+        let layer = host.metalLayer
+        activeURL = url
 
-        // 隔行 1080i 源：VideoToolbox 硬解可能永不输出第一帧（与 AVPlayer 幻灯片同根因），
-        // 必须用软件解码 + 去隔行（与桌面 FFmpeg/VLC 成功路径一致）。
-        setStringProperty("hwdec", softwareDecode ? "no" : "videotoolbox")
-        setFlagProperty("deinterlace", softwareDecode)
-        setVolumeProperty(volume)
-        // 确保视频输出开启：后台会设 vid=no，若残留会导致加载新文件后有声音无画面
-        setStringProperty("vid", "auto")
-        stoppedByOwner = false
-        command("loadfile", args: [url.absoluteString, "replace"])
-        onStateChanged?("正在打开")
+        // mpv 的 stop/loadfile 是同步命令，死流下可能阻塞在 demux 锁上
+        // （network-timeout 量级），绝不能在主线程等它——全部派发到事件队列。
+        // 队列 FIFO 保证与 stop() 的先后语义一致。
+        eventQueue.async { [weak self] in
+            guard let self else { return }
+            guard self.ensureMpvInitialized(layer: layer) else {
+                self.notifyError("mpv 初始化失败")
+                return
+            }
 
-        // 起播前确保解除暂停：stop() 不会复位 pause 属性，若上一会话暂停过，
-        // 新文件加载后会一直停在暂停（画面冻结、无声音），必须显式恢复播放。
-        setFlagProperty("pause", false)
+            self.command("stop", args: [])
 
-        // 开启后台采样循环
-        samplerCancelled = false
-        scheduleNextSample()
+            // 隔行 1080i 源：VideoToolbox 硬解可能永不输出第一帧（与 AVPlayer 幻灯片同根因），
+            // 必须用软件解码 + 去隔行（与桌面 FFmpeg/VLC 成功路径一致）。
+            self.setStringProperty("hwdec", softwareDecode ? "no" : "videotoolbox")
+            self.setFlagProperty("deinterlace", softwareDecode)
+            self.setVolumeProperty(volume)
+            // 确保视频输出开启：后台会设 vid=no，若残留会导致加载新文件后有声音无画面
+            self.setStringProperty("vid", "auto")
+            self.stoppedByOwner = false
+            self.command("loadfile", args: [url.absoluteString, "replace"])
+            self.notifyState("正在打开")
+
+            // 起播前确保解除暂停：stop() 不会复位 pause 属性，若上一会话暂停过，
+            // 新文件加载后会一直停在暂停（画面冻结、无声音），必须显式恢复播放。
+            self.setFlagProperty("pause", false)
+
+            // 开启后台采样循环
+            self.samplerCancelled = false
+            self.scheduleNextSample()
+        }
     }
 
     func pause() {
-        setFlagProperty("pause", true)
+        eventQueue.async { [weak self] in
+            self?.setFlagProperty("pause", true)
+        }
     }
 
     func resume() {
         try? AVAudioSession.sharedInstance().setActive(true)
-        setFlagProperty("pause", false)
+        eventQueue.async { [weak self] in
+            self?.setFlagProperty("pause", false)
+        }
     }
 
     func stop() {
         stoppedByOwner = true
         reportedPlaying = false
         samplerCancelled = true
-        command("stop", args: [])
         activeURL = nil
         snapshotLock.lock()
         lastSnapshot = DiagnosticsSample()
         snapshotLock.unlock()
+        // stop 命令同样可能阻塞在 demux 锁上，派发到事件队列；
+        // FIFO 保证与 play 的先后语义一致（谁后入队谁生效）
+        eventQueue.async { [weak self] in
+            self?.command("stop", args: [])
+        }
     }
 
     var isPlaying: Bool {
-        !getFlagProperty("pause") && !getFlagProperty("core-idle")
+        // 只读采样快照（≤0.5s 延迟），不在调用线程直查 mpv——那可能阻塞在 demux 锁上
+        diagnosticsSample().stateText == "播放中"
     }
 
     var volume: Float {
-        get { Float(getInt64Property("volume")) / 100 }
+        get { volumeState }
         set { setVolumeProperty(newValue) }
     }
 
@@ -306,10 +356,18 @@ final class MPVPlaybackEngine {
     }
 
     private func reportPlayingIfNeeded() {
-        guard !reportedPlaying else { return }
-        reportedPlaying = true
-        DispatchQueue.main.async { [weak self] in
-            self?.onPlaying?()
+        // 检查+置位必须在同一次锁内完成：事件队列与采样队列都会调用，
+        // 分开两次锁会导致双报 onPlaying
+        stateLock.lock()
+        let already = _reportedPlaying
+        if !already {
+            _reportedPlaying = true
+        }
+        stateLock.unlock()
+        if !already {
+            DispatchQueue.main.async { [weak self] in
+                self?.onPlaying?()
+            }
         }
     }
 
@@ -397,6 +455,7 @@ final class MPVPlaybackEngine {
 
     private func setVolumeProperty(_ volume: Float) {
         let v = Int64((max(0, min(1, volume)) * 100).rounded())
+        volumeState = Float(v) / 100
         setInt64Property("volume", v)
         setFlagProperty("mute", false)
     }

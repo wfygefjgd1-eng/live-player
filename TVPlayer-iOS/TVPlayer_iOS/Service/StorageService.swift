@@ -60,13 +60,29 @@ final class StorageService {
         }
     }
 
-    // MARK: - 频道缓存（异步 + 分批）
+    // MARK: - 频道缓存（文件存储 + 内存缓存）
+    // 频道缓存可能有几 MB：UserDefaults 不适合存大块数据（全量 plist 重写、启动主线程解码慢），
+    // 改为 Caches 目录文件 + 原子写入 + 解码结果内存缓存；老版本的 UserDefaults 缓存首次读取时自动迁移。
+
+    private var channelsMemo: [Channel]?
+    private var channelsCacheURL: URL {
+        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        return dir.appendingPathComponent("channels_cache.json")
+    }
 
     func saveChannels(_ channels: [Channel]) {
         queue.async(flags: .barrier) { [weak self] in
             guard let self else { return }
-            let data = try? JSONEncoder().encode(channels)
-            self.defaults.set(data, forKey: self.kChannels)
+            self.channelsMemo = channels
+            guard let data = try? JSONEncoder().encode(channels) else { return }
+            do {
+                try data.write(to: self.channelsCacheURL, options: .atomic)
+                // 文件写成功后清掉老版本塞在 UserDefaults 里的整表数据
+                self.defaults.removeObject(forKey: self.kChannels)
+            } catch {
+                // 文件写失败时退回 UserDefaults，保证缓存不丢
+                self.defaults.set(data, forKey: self.kChannels)
+            }
 
             // 保存元数据
             let meta = ChannelsMeta(version: self.currentDataVersion,
@@ -80,18 +96,31 @@ final class StorageService {
     }
 
     func loadChannels() -> [Channel] {
-        queue.sync {
+        // 用 barrier：本方法会写 channelsMemo，与 saveChannels 的写互斥
+        queue.sync(flags: .barrier) { [weak self] in
+            guard let self else { return [] }
+            if let memo = self.channelsMemo {
+                return memo
+            }
             // 检查数据版本，必要时迁移
-            let savedVersion = defaults.integer(forKey: kDataVersion)
-            if savedVersion < currentDataVersion {
-                migrateData(from: savedVersion)
+            let savedVersion = self.defaults.integer(forKey: self.kDataVersion)
+            if savedVersion < self.currentDataVersion {
+                self.migrateData(from: savedVersion)
             }
 
-            guard let data = defaults.data(forKey: kChannels),
-                  let channels = try? JSONDecoder().decode([Channel].self, from: data) else {
-                return []
+            var loaded: [Channel] = []
+            if let data = try? Data(contentsOf: self.channelsCacheURL),
+               let channels = try? JSONDecoder().decode([Channel].self, from: data) {
+                loaded = channels
+            } else if let data = self.defaults.data(forKey: self.kChannels),
+                      let channels = try? JSONDecoder().decode([Channel].self, from: data) {
+                // 老版本 UserDefaults 缓存：迁移到文件后清除
+                loaded = channels
+                try? data.write(to: self.channelsCacheURL, options: .atomic)
+                self.defaults.removeObject(forKey: self.kChannels)
             }
-            return channels
+            self.channelsMemo = loaded
+            return loaded
         }
     }
 
@@ -338,6 +367,8 @@ final class StorageService {
     func clearAll() {
         queue.async(flags: .barrier) { [weak self] in
             guard let self else { return }
+            try? FileManager.default.removeItem(at: self.channelsCacheURL)
+            self.channelsMemo = nil
             for key in [self.kChannels, self.kChannelsMeta, self.kSourceUrls,
                          self.kSelectedSource, self.kCustomSource, self.kHiddenLines,
                          self.kBlacklistedLines, self.kFavorites, self.kLastChannelKey,

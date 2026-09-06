@@ -1,5 +1,6 @@
 import SwiftUI
 import AVKit
+import Combine
 import UIKit
 import MediaPlayer
 
@@ -141,6 +142,14 @@ final class PlayerViewModel: ObservableObject {
     /// 音量指示节流
     private var lastVolumeIndicatorAt: Date = .distantPast
 
+    // MARK: - 分组/浏览序缓存
+    /// channels 或 favorites 变化时置脏；search 词单独作为缓存键
+    private var sectionsDirty = true
+    private var cachedSearchKey: String?
+    private var cachedSections: [ChannelSection] = []
+    private var cachedBrowseOrder: [Channel] = []
+    private var sectionsCancellables = Set<AnyCancellable>()
+
     func startup() {
         guard !started else { return }
         started = true
@@ -162,6 +171,11 @@ final class PlayerViewModel: ObservableObject {
         NetworkMonitor.shared.onConnectionTypeChanged = { [weak self] type in
             self?.onConnectionTypeChanged(type)
         }
+
+        // 数据或收藏变化时使分组/浏览序缓存失效（sections(search:)/browseOrderedChannels 读缓存）
+        $channels.combineLatest($favorites)
+            .sink { [weak self] _ in self?.sectionsDirty = true }
+            .store(in: &sectionsCancellables)
 
         // 后台/前台：后台播放关闭时进入后台暂停、回前台恢复
         // block 观察者 token 必须保存并在 deinit 移除，否则被 center 强持有常驻
@@ -642,24 +656,22 @@ final class PlayerViewModel: ObservableObject {
         return 0
     }
 
-    /// 识别 CCTV1，忽略语言/空格/横线；排除 CCTV10–17
+    /// 识别 CCTV1，忽略语言/空格/横线；排除 CCTV10–17。
+    /// 结果在 Channel 构造时预计算（isCCTV1），这里只读字段，避免排序比较器跑正则。
     private static func isCCTV1Channel(_ ch: Channel) -> Bool {
-        if M3UParserService.cctvNumber(from: ch.key) == 1 { return true }
-        if M3UParserService.cctvNumber(from: ch.name) == 1 { return true }
-        let n = ch.name.replacingOccurrences(of: " ", with: "")
-        if n.contains("中央一台") || n.contains("央视一台") || n.contains("中央一") { return true }
-        if (n.contains("综合") || n.contains("綜合"))
-            && (n.contains("央视") || n.contains("中央") || n.uppercased().contains("CCTV")) {
-            // 综合台通常即 CCTV-1
-            let num = M3UParserService.cctvNumber(from: ch.key)
-            if num == Int.max || num == 1 { return true }
-        }
-        return false
+        ch.isCCTV1
     }
 
     /// 与侧栏一致的浏览顺序（收藏→央视→…），上下滑/超时切台都按此序，避免「乱跳」
     func browseOrderedChannels() -> [Channel] {
-        ensureCCTV1FirstInBrowseOrder(sections(search: "").flatMap(\.channels))
+        // 缓存浏览序：该方法在每次滑动/自动切台都会调用，
+        // 失效由 $channels/$favorites 的 Combine 订阅统一触发（sectionsDirty）
+        if !sectionsDirty, !cachedBrowseOrder.isEmpty {
+            return cachedBrowseOrder
+        }
+        let ordered = ensureCCTV1FirstInBrowseOrder(sections(search: "").flatMap(\.channels))
+        cachedBrowseOrder = ordered
+        return ordered
     }
 
     private func advanceChannel(delta: Int, userInitiated: Bool) {
@@ -777,6 +789,11 @@ final class PlayerViewModel: ObservableObject {
 
     func sections(search: String) -> [ChannelSection] {
         let q = search.trimmingCharacters(in: .whitespaces).lowercased()
+        // 命中缓存：分组+排序是 O(n log n) 且比较器较重，
+        // body 重算与每次切台都会调用，只在数据/收藏/搜索词变化时重算
+        if !sectionsDirty, q == cachedSearchKey {
+            return cachedSections
+        }
         let list: [Channel] = q.isEmpty
             ? channels
             : channels.filter { $0.name.lowercased().contains(q) || $0.group.lowercased().contains(q) }
@@ -798,13 +815,9 @@ final class PlayerViewModel: ObservableObject {
 
         func sortChannels(_ arr: [Channel]) -> [Channel] {
             arr.sorted { a, b in
-                let a1 = Self.isCCTV1Channel(a)
-                let b1 = Self.isCCTV1Channel(b)
-                if a1 != b1 { return a1 && !b1 }
-                let na = M3UParserService.cctvNumber(from: a.key)
-                let nb = M3UParserService.cctvNumber(from: b.key)
-                if na != Int.max || nb != Int.max {
-                    if na != nb { return na < nb }
+                if a.isCCTV1 != b.isCCTV1 { return a.isCCTV1 && !b.isCCTV1 }
+                if a.cctvNum != Int.max || b.cctvNum != Int.max {
+                    if a.cctvNum != b.cctvNum { return a.cctvNum < b.cctvNum }
                 }
                 return a.name.localizedStandardCompare(b.name) == .orderedAscending
             }
@@ -836,6 +849,9 @@ final class PlayerViewModel: ObservableObject {
                 result.append(ChannelSection(id: g, title: g, channels: sortChannels(arr)))
             }
         }
+        cachedSearchKey = q
+        cachedSections = result
+        sectionsDirty = false
         return result
     }
 

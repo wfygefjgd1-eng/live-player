@@ -110,6 +110,22 @@ class M3UParserService {
         return Int.max
     }
 
+    /// CCTV-1 判定（含「中央一台/央视综合」等别名）。
+    /// 在 Channel 构造时预计算结果，避免分组排序的比较器里对每个元素反复跑正则。
+    static func isCCTV1(name: String, key: String) -> Bool {
+        if cctvNumber(from: key) == 1 { return true }
+        if cctvNumber(from: name) == 1 { return true }
+        let n = name.replacingOccurrences(of: " ", with: "")
+        if n.contains("中央一台") || n.contains("央视一台") || n.contains("中央一") { return true }
+        if (n.contains("综合") || n.contains("綜合"))
+            && (n.contains("央视") || n.contains("中央") || n.uppercased().contains("CCTV")) {
+            // 综合台通常即 CCTV-1
+            let num = cctvNumber(from: key)
+            if num == Int.max || num == 1 { return true }
+        }
+        return false
+    }
+
     static func normalizeName(_ name: String) -> String {
         var w = name.trimmingCharacters(in: .whitespaces).lowercased()
         if let m = cctvPattern.firstMatch(in: w), m.count > 1, let num = Int(m[1]) {

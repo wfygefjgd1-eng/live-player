@@ -40,6 +40,10 @@ struct Channel: Codable, Identifiable, Equatable, Hashable {
     let name: String
     let group: String
     let key: String
+    /// 预计算排序键：频道列表每次渲染/切台都会分组排序，
+    /// 避免在排序比较器里对每个元素反复跑 CCTV 正则
+    let cctvNum: Int
+    let isCCTV1: Bool
     private(set) var urls: [String]
     // 线路查重用 Set：Array.contains 是 O(n)，多源合并会退化成 O(n²)
     private var urlSet: Set<String> = []
@@ -55,6 +59,8 @@ struct Channel: Codable, Identifiable, Equatable, Hashable {
         self.group = trimmedGroup.isEmpty ? "未分组" : trimmedGroup
         self.key = (key?.trimmingCharacters(in: .whitespaces)).flatMap { $0.isEmpty ? nil : $0 }
             ?? M3UParserService.normalizeName(trimmedName)
+        self.cctvNum = M3UParserService.cctvNumber(from: self.key)
+        self.isCCTV1 = M3UParserService.isCCTV1(name: self.name, key: self.key)
         self.urls = []
         if let urls {
             for u in urls {
@@ -68,7 +74,10 @@ struct Channel: Codable, Identifiable, Equatable, Hashable {
         let decodedName = try c.decode(String.self, forKey: .name)
         self.name = decodedName
         self.group = try c.decode(String.self, forKey: .group)
-        self.key = try c.decode(String.self, forKey: .key)
+        let decodedKey = try c.decode(String.self, forKey: .key)
+        self.key = decodedKey
+        self.cctvNum = M3UParserService.cctvNumber(from: decodedKey)
+        self.isCCTV1 = M3UParserService.isCCTV1(name: decodedName, key: decodedKey)
         let list = try c.decode([String].self, forKey: .urls)
         self.urls = []
         for u in list {
