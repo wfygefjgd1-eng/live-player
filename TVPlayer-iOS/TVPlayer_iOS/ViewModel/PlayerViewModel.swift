@@ -103,8 +103,9 @@ final class PlayerViewModel: ObservableObject {
     var diagnosticsSummary: String { player.diagnosticsSummary }
     private let storage = StorageService()
     private var rawChannels: [Channel] = []
-    var sourceUrls: [String] = []
-    var activeSourceUrl = DEFAULT_SOURCE_URL
+    /// @Published：来源管理页直接读这两个属性，不加 Published 删除后 UI 不刷新
+    @Published var sourceUrls: [String] = []
+    @Published var activeSourceUrl = DEFAULT_SOURCE_URL
     private var autoSwitchState: AutoSwitchState = .idle
     private var pendingAutoSwitchReminder: String?
     private var started = false
@@ -135,6 +136,10 @@ final class PlayerViewModel: ObservableObject {
     /// 用户主动暂停：回前台/中断结束不得强制 resume
     private(set) var userPaused = false
     private var wasPlayingBeforeInterruption = false
+    /// 后台/前台 block 观察者 token，deinit 注销
+    private var appLifecycleObservers: [NSObjectProtocol] = []
+    /// 音量指示节流
+    private var lastVolumeIndicatorAt: Date = .distantPast
 
     func startup() {
         guard !started else { return }
@@ -159,16 +164,17 @@ final class PlayerViewModel: ObservableObject {
         }
 
         // 后台/前台：后台播放关闭时进入后台暂停、回前台恢复
-        NotificationCenter.default.addObserver(
+        // block 观察者 token 必须保存并在 deinit 移除，否则被 center 强持有常驻
+        appLifecycleObservers.append(NotificationCenter.default.addObserver(
             forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
         ) { [weak self] _ in
             self?.onAppEnteredBackground()
-        }
-        NotificationCenter.default.addObserver(
+        })
+        appLifecycleObservers.append(NotificationCenter.default.addObserver(
             forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
         ) { [weak self] _ in
             self?.onAppWillEnterForeground()
-        }
+        })
 
         restoreSources()
         lastEntrySourceReloadAt = Date()
@@ -236,15 +242,25 @@ final class PlayerViewModel: ObservableObject {
                 self.bootstrapMessage = "正在重新加载频道..."
                 self.loadChannels(force: true, silent: false, preferActiveOnly: true)
             }
-            while !Task.isCancelled {
+            // 无限 5s 重拉既耗电耗流量、每次还会改写缓存；改为指数退避并在上限后停止，
+            // 网络恢复时由 onNetworkBecameAvailable 重新触发
+            var attempt = 0
+            var backoff: UInt64 = 10
+            while !Task.isCancelled, attempt < 8 {
+                try? await Task.sleep(nanoseconds: backoff * 1_000_000_000)
+                guard !Task.isCancelled else { return }
                 if !self.channels.isEmpty {
                     self.isBootstrapping = false
                     return
                 }
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
-                guard !Task.isCancelled else { return }
+                attempt += 1
+                backoff = min(backoff * 2, 60)
                 self.bootstrapMessage = "仍无频道，继续刷新..."
                 self.loadChannels(force: true, silent: false, preferActiveOnly: true)
+            }
+            if self.channels.isEmpty {
+                self.bootstrapMessage = "暂时无法加载频道，网络恢复后自动重试"
+                self.isBootstrapping = false
             }
         }
     }
@@ -561,9 +577,19 @@ final class PlayerViewModel: ObservableObject {
             return nil
         }
 
-        return json.channels.map { ch in
-            Channel(name: ch.name, group: ch.group, key: ch.name, urls: ch.urls)
+        // 按 key 归一合并：Bundle 数据不保证按名唯一，重复 key 会让 List 出现重复 id
+        var merged = OrderedDictionary<String, Channel>()
+        for ch in json.channels {
+            // key 缺省走 normalizeName，不能直接用 name（跨分组同名会撞 id）
+            let channel = Channel(name: ch.name, group: ch.group, urls: ch.urls)
+            if var existing = merged[channel.key] {
+                existing.merge(with: channel)
+                merged[channel.key] = existing
+            } else {
+                merged[channel.key] = channel
+            }
         }
+        return Array(merged.values)
     }
 
     func buildCandidates() -> [String] {
@@ -866,6 +892,7 @@ final class PlayerViewModel: ObservableObject {
     /// 统一起播：仅 hardFail 预检跳过；unknown/ok 交给系统播放器。
     private func playLineLoop(channel ch: Channel, generation gen: Int, showOSD: Bool, preflight: Bool = true) async {
         var guardLoops = 0
+        var skippedUnsupported = 0
         while guardLoops < ch.sourceCount {
             guard !Task.isCancelled, playGeneration == gen else { return }
             guard currentChannel?.key == ch.key else { return }
@@ -894,6 +921,7 @@ final class PlayerViewModel: ObservableObject {
                 if lineTimeoutEnabled {
                     triedLineIndices.insert(idx)
                     currentSourceIndex = (idx + 1) % max(ch.sourceCount, 1)
+                    skippedUnsupported += 1
                     continue
                 }
                 autoSwitchState = .idle
@@ -929,7 +957,11 @@ final class PlayerViewModel: ObservableObject {
         guard playGeneration == gen else { return }
         // 当前事务已经尝试完所有线路，允许 autoSwitchLine 决定是否切下一台。
         autoSwitchState = .idle
-        showIndicator("当前频道无可用线路")
+        if skippedUnsupported >= ch.sourceCount {
+            showIndicator("线路协议不支持（仅支持 http/https）")
+        } else {
+            showIndicator("当前频道无可用线路")
+        }
         autoSwitchLine(hint: "当前频道无可用线路", reason: .hardFail)
     }
 
@@ -1306,10 +1338,16 @@ final class PlayerViewModel: ObservableObject {
         let deltaY = translationHeight - lastVolumeTranslation
         lastVolumeTranslation = translationHeight
         VolumeHelper.adjust(by: Float(-deltaY) / 200)
+        // 手势每个 tick 都到这里：指示文案 ≥100ms 才刷一次，
+        // 否则 @Published indicatorText 按帧触发整棵 SwiftUI 树重算
+        let now = Date()
+        guard now.timeIntervalSince(lastVolumeIndicatorAt) >= 0.1 else { return }
+        lastVolumeIndicatorAt = now
         showIndicator("音量 \(Int(VolumeHelper.current * 100))%")
     }
 
     deinit {
+        appLifecycleObservers.forEach { NotificationCenter.default.removeObserver($0) }
         osdTask?.cancel()
         indTask?.cancel()
         cooldownTask?.cancel()

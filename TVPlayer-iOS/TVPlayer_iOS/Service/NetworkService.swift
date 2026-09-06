@@ -129,16 +129,40 @@ final class NetworkService {
 
         var request = URLRequest(url: u, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout)
         request.setValue(ua, forHTTPHeaderField: "User-Agent")
-        let (data, response) = try await session.data(for: request)
+        // 流式读取并边读边限量：先全量下载再校验的话，超大/异常响应会先吃满内存
+        let (bytes, response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse,
               (200...299).contains(http.statusCode) else {
             throw NetworkFetchError.badResponse
         }
+        // expectedContentLength 未知时为 -1，不会误判为超大
+        if http.expectedContentLength > Self.maxBodyBytes {
+            throw NetworkFetchError.parseEmpty
+        }
+        var buffer = [UInt8]()
+        buffer.reserveCapacity(256 * 1024)
+        do {
+            for try await byte in bytes {
+                buffer.append(byte)
+                if buffer.count > Self.maxBodyBytes {
+                    throw NetworkFetchError.parseEmpty
+                }
+            }
+        } catch let e as NetworkFetchError {
+            throw e
+        } catch {
+            throw NetworkFetchError.badResponse
+        }
+        let data = Data(buffer)
         // 超大源（几十 MB）拒绝解析，避免内存占用过高；正常 M3U 都在 KB 级
         if data.count > Self.maxBodyBytes {
             throw NetworkFetchError.parseEmpty
         }
         guard let text = String(data: data, encoding: .utf8), !text.isEmpty else {
+            // 中文圈仍有 GBK/GB18030 源；Latin1 对任意字节都"成功"会产生静默乱码，只作最后兜底
+            if let gbk = String(data: data, encoding: Self.gb18030), !gbk.isEmpty {
+                return gbk
+            }
             if let text2 = String(data: data, encoding: .isoLatin1), !text2.isEmpty {
                 return text2
             }
@@ -146,6 +170,10 @@ final class NetworkService {
         }
         return text
     }
+
+    /// GB18030（兼容 GBK/GB2312）文本编码
+    private static let gb18030 = String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(
+        CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)))
 
     /// M3U 源最大字节数：5MB 足够容纳最大公开源（几十万行），再大视为异常拒绝
     private static let maxBodyBytes = 5 * 1024 * 1024

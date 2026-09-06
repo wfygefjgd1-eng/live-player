@@ -2,14 +2,31 @@ import Foundation
 
 class M3UParserService {
     private static let groupPattern = try! NSRegularExpression(pattern: "group-title=\"([^\"]*)\"")
-    private static let namePattern = try! NSRegularExpression(pattern: ",(.+?)$")
     private static let cctvPattern = try! NSRegularExpression(pattern: "cctv\\s*[-_ ]*0*([1-9]\\d*)(k|\\+)?", options: .caseInsensitive)
     private static let trailingPattern = try! NSRegularExpression(
         pattern: "(fhd|uhd|hd|sd|4k|8k|1080p|720p|576p|50fps|60fps|h264|h265|hevc|hdr|"
             + "高清|超清|标清|蓝光|流畅|高码|高帧|测试|备用\\d*|线路\\d+|源\\d+|"
-            + "直播|在线|综合|频道|央视|卫视|中文|台)$",
+            + "直播|在线|综合|频道|央视|中文)$",
         options: .caseInsensitive
     )
+
+    /// 取 EXTINF 行「引号外最后一个逗号」之后的文本作为频道名。
+    /// 旧实现取第一个逗号，遇到 group-title="央视,新闻" 这类含逗号属性会把名字截成残片。
+    private static func extractDisplayName(from extinfLine: String) -> String {
+        var inQuotes = false
+        var lastComma: String.Index? = nil
+        for i in extinfLine.indices {
+            let c = extinfLine[i]
+            if c == "\"" {
+                inQuotes.toggle()
+            } else if c == "," && !inQuotes {
+                lastComma = i
+            }
+        }
+        guard let idx = lastComma else { return "未知" }
+        let name = extinfLine[extinfLine.index(after: idx)...].trimmingCharacters(in: .whitespaces)
+        return name.isEmpty ? "未知" : name
+    }
 
     static func parse(_ text: String) -> [Channel] {
         // 剥离 UTF-8 BOM：带 BOM 的源首行 hasPrefix("#EXTINF:") 会失败，导致首个频道丢失
@@ -26,9 +43,7 @@ class M3UParserService {
                 if let g = groupPattern.firstMatch(in: line), g.count > 1 {
                     pendingGroup = g[1]
                 }
-                if let n = namePattern.firstMatch(in: line), n.count > 1 {
-                    pendingName = n[1]
-                }
+                pendingName = extractDisplayName(from: line)
             } else if line.hasPrefix("#EXTGRP:") {
                 // 部分源用 #EXTGRP 标记分组，优先于 #EXTINF 里可能缺失的 group-title
                 let groupName = line.dropFirst("#EXTGRP:".count).trimmingCharacters(in: .whitespaces)
@@ -101,7 +116,8 @@ class M3UParserService {
             let suffix = m.count > 2 && !m[2].isEmpty ? m[2].uppercased() : ""
             return "cctv\(num)\(suffix)"
         }
-        w = w.replacingOccurrences(of: "[\\s\\-—_\u{00B7}\u{002E}\u{FF0C}\u{3001}\u{3002}/\\\\|()（）\\[\\]【】:+]+", with: "", options: .regularExpression)
+        // ASCII 逗号也作分隔符：显示名残留的半角逗号不应参与 key 合并
+        w = w.replacingOccurrences(of: "[\\s\\-—_\u{00B7}\u{002E},\u{FF0C}\u{3001}\u{3002}/\\\\|()（）\\[\\]【】:+]+", with: "", options: .regularExpression)
         for (a, b) in [("中央", "cctv"), ("央视", "cctv"), ("高清", ""), ("超清", ""), ("蓝光", ""), ("流畅", ""), ("频道", ""), ("直播", ""), ("在线", "")] {
             w = w.replacingOccurrences(of: a, with: b)
         }

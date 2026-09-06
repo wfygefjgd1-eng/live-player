@@ -492,6 +492,11 @@ final class PlayerEngine: ObservableObject {
                 attempts += 1
                 try? await Task.sleep(nanoseconds: 250_000_000)
             }
+            // 只有「尝试耗尽」才允许代旧 token 强制转出；被取消 / 已切台（token 失效）
+            // 时直接返回——此时新频道有自己的加载流程，误触发 onReady 会提前抹掉
+            // 新频道的「已自动切换」提示与加载徽标
+            guard !Task.isCancelled, self.playToken == token,
+                  self.activeBackend == backend else { return }
             self.isSwitching = false
             fireOnReady()
         }
@@ -907,6 +912,10 @@ final class PlayerEngine: ObservableObject {
         let current = CMTimeGetSeconds(item.currentTime())
         let buffered = max(0, bufferedEnd - (current.isFinite ? current : 0))
         let now = Date()
+        // 距上次采样的真实间隔（秒，首样记 0、异常封顶 2s）：卡顿累计必须按真实时间，
+        // 本采样 0.5s 一次而 mpv 路径 1s 一次，按次数 +1 会让 AVPlayer 阈值实际减半
+        let sampleDt = lastAVSampleTime == .distantPast
+            ? 0 : min(max(now.timeIntervalSince(lastAVSampleTime), 0), 2)
         let transferDuration = event?.transferDuration ?? 0
         let totalBytes = Double(event?.numberOfBytesTransferred ?? 0)
         let avgDownloadKBps = transferDuration > 0.05
@@ -993,7 +1002,7 @@ final class PlayerEngine: ObservableObject {
         // 卡顿/无数据
         if item.isPlaybackBufferEmpty || state == "缓冲中" {
             registerStall()
-            consecutiveBufferSeconds += 1
+            consecutiveBufferSeconds += sampleDt
             if consecutiveBufferSeconds >= Self.progressStallThreshold, !lowSpeedReported {
                 lowSpeedReported = true
                 onLowSpeed?("持续缓冲无数据，自动换线")

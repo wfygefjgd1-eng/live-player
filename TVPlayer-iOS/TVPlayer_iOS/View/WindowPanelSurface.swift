@@ -60,6 +60,9 @@ final class WindowPanelSurface {
         hide(animated: false)
     }
 
+    /// show() 等不到 UIWindowScene 时的重试次数上限（0.05s × 100 = 5s），避免极端时机无限空转
+    private var pendingShowRetries = 0
+
     func show() {
         if isVisible {
             ensureOnTop()
@@ -68,11 +71,14 @@ final class WindowPanelSurface {
         isVisible = true
         guard ensureOverlayWindow() else {
             isVisible = false
+            guard pendingShowRetries < 100 else { return }
+            pendingShowRetries += 1
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
                 self?.show()
             }
             return
         }
+        pendingShowRetries = 0
 
         guard let win = overlayWindow else { return }
         // 抬手误触保护：约 0.45s 内点遮罩不关

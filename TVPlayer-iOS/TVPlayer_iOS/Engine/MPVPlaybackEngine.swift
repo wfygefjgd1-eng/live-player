@@ -103,10 +103,16 @@ final class MPVPlaybackEngine {
             NotificationCenter.default.removeObserver(foregroundObserver)
         }
         samplerCancelled = true
-        if let mpv {
-            mpv_terminate_destroy(mpv)
-            self.mpv = nil
+        // 等在途采样结束：采样线程可能正持有 mpv 句柄做属性查询，
+        // 不等它就直接 terminate_destroy 会在查询中途拆掉 ctx
+        samplerQueue.sync { }
+        if let ctx = mpv {
+            // 先摘掉唤醒回调再销毁：terminate_destroy 过程中 mpv 内部线程仍可能
+            // 发起最后几次唤醒，回调经 unretained 指针访问已析构对象就是 UAF
+            mpv_set_wakeup_callback(ctx, nil, nil)
+            mpv_terminate_destroy(ctx)
         }
+        mpv = nil
     }
 
     // MARK: - Public API（与旧 VLCPlaybackEngine 保持同一形状）
@@ -229,7 +235,15 @@ final class MPVPlaybackEngine {
         checkError(mpv_set_option_string(ctx, "sid", "no"))
         checkError(mpv_set_option_string(ctx, "osd-level", "0"))
 
-        checkError(mpv_initialize(ctx))
+        // mpv_initialize 失败不能吞：否则 loadfile 全部失败，上层要白等 35-50s 起播超时才换线
+        let initRc = mpv_initialize(ctx)
+        if initRc < 0 {
+            captureLog("[app] mpv_initialize 失败: \(String(cString: mpv_error_string(initRc)))\n")
+            mpv_set_wakeup_callback(ctx, nil, nil)
+            mpv_terminate_destroy(ctx)
+            mpv = nil
+            return false
+        }
 
         mpv_set_wakeup_callback(ctx, { raw in
             let engine = unsafeBitCast(raw, to: MPVPlaybackEngine.self)

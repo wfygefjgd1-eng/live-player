@@ -41,6 +41,8 @@ struct Channel: Codable, Identifiable, Equatable, Hashable {
     let group: String
     let key: String
     private(set) var urls: [String]
+    // 线路查重用 Set：Array.contains 是 O(n)，多源合并会退化成 O(n²)
+    private var urlSet: Set<String> = []
 
     enum CodingKeys: String, CodingKey {
         case name, group, key, urls
@@ -61,10 +63,24 @@ struct Channel: Codable, Identifiable, Equatable, Hashable {
         }
     }
 
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let decodedName = try c.decode(String.self, forKey: .name)
+        self.name = decodedName
+        self.group = try c.decode(String.self, forKey: .group)
+        self.key = try c.decode(String.self, forKey: .key)
+        let list = try c.decode([String].self, forKey: .urls)
+        self.urls = []
+        for u in list {
+            addUrl(u)
+        }
+    }
+
     /// 添加 URL（去重 + 清理）
     mutating func addUrl(_ url: String) {
         let clean = url.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !clean.isEmpty, !urls.contains(clean) else { return }
+        guard !clean.isEmpty, !urlSet.contains(clean) else { return }
+        urlSet.insert(clean)
         urls.append(clean)
     }
 
@@ -79,6 +95,7 @@ struct Channel: Codable, Identifiable, Equatable, Hashable {
     mutating func removeUrl(_ url: String) {
         let clean = url.trimmingCharacters(in: .whitespacesAndNewlines)
         urls.removeAll { $0 == clean }
+        urlSet.remove(clean)
     }
 
     var sourceCount: Int { urls.count }
