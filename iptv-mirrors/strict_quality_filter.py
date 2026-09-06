@@ -22,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
-BASE = Path(r"C:\Users\96335\Desktop\TVPlayer")
+BASE = Path(__file__).resolve().parents[1]
 MIRRORS = BASE / "iptv-mirrors"
 IOS_RES = BASE / "TVPlayer-iOS" / "TVPlayer_iOS" / "Resources"
 IOS_SCRIPTS = BASE / "TVPlayer-iOS" / "scripts"

@@ -23,7 +23,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-BASE = Path(r"C:\Users\96335\Desktop\TVPlayer")
+BASE = Path(__file__).resolve().parents[1]
 MIRRORS = BASE / "iptv-mirrors"
 IOS_RES = BASE / "TVPlayer-iOS" / "TVPlayer_iOS" / "Resources"
 IOS_SCRIPTS = BASE / "TVPlayer-iOS" / "scripts"

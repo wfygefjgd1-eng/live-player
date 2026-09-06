@@ -28,7 +28,7 @@ def download_m3u(url, timeout=30):
         headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(url, timeout=timeout, headers=headers)
         response.raise_for_status()
-        return response.text
+        return response.content.decode('utf-8', errors='replace')
     except Exception as e:
         print(f"  [错误] 下载失败: {e}")
         return None
@@ -62,16 +62,23 @@ def parse_m3u(content):
             if group_match:
                 group = group_match.group(1)
 
-            # 下一行是 URL
-            i += 1
-            if i < len(lines):
-                url = lines[i].strip()
+            # URL 行：跳过中间的 #EXTVLCOPT/#EXTGRP/#EXT-X 等指令行和空行
+            j = i + 1
+            while j < len(lines):
+                nxt = lines[j].strip()
+                if not nxt or (nxt.startswith('#') and not nxt.startswith('#EXTINF')):
+                    j += 1
+                    continue
+                break
+            if j < len(lines):
+                url = lines[j].strip()
                 if url and not url.startswith('#') and name:
                     channels.append({
                         'name': name,
                         'group': group,
                         'url': url
                     })
+                    i = j
 
         i += 1
 
@@ -81,7 +88,7 @@ def merge_channels(all_sources_channels):
     """
     合并多个源的频道，按频道名称去重并收集所有线路
     """
-    merged = defaultdict(lambda: {'group': '其他', 'urls': []})
+    merged = defaultdict(lambda: {'group': '其他', 'urls': [], '_seen': set()})
 
     for channels in all_sources_channels:
         for ch in channels:
@@ -94,7 +101,8 @@ def merge_channels(all_sources_channels):
                 merged[name]['group'] = group
 
             # 添加 URL（去重）
-            if url not in merged[name]['urls']:
+            if url not in merged[name]['_seen']:
+                merged[name]['_seen'].add(url)
                 merged[name]['urls'].append(url)
 
     # 转换为列表格式

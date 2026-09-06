@@ -11,6 +11,7 @@ import asyncio
 import aiohttp
 import json
 import re
+from pathlib import Path
 from typing import List, Dict, Tuple
 from datetime import datetime
 from collections import defaultdict
@@ -31,7 +32,6 @@ PRESET_SOURCES = [
 TIMEOUT = 2  # 验证超时时间（秒）
 CONCURRENT = 30  # 并发数
 MAX_URLS_PER_CHANNEL = 3  # 每个频道最多保留几个可用源
-STAGE1_CONCURRENT = 50  # 第一阶段并发数
 
 def parse_m3u(content: str) -> List[Dict]:
     """解析 M3U 文件，提取频道和 URL"""
@@ -54,11 +54,10 @@ def parse_m3u(content: str) -> List[Dict]:
             name_match = re.search(r'tvg-name="([^"]*)"', line)
             group_match = re.search(r'group-title="([^"]*)"', line)
 
-            # 如果没有 tvg-name，尝试从行尾提取
+            # 如果没有 tvg-name，从第一个逗号后提取（与其它解析器约定一致）
             if not name_match:
-                parts = line.split(',')
-                if len(parts) > 1:
-                    name = parts[-1].strip()
+                if ',' in line:
+                    name = line.split(',', 1)[1].strip()
                 else:
                     name = "未知频道"
             else:
@@ -98,30 +97,6 @@ async def download_m3u(session: aiohttp.ClientSession, name: str, url: str) -> T
     except Exception as e:
         print(f"[失败] {name}: {str(e)}")
         return (name, [])
-
-async def validate_url_stage1(session: aiohttp.ClientSession, url: str) -> bool:
-    """第一阶段：快速格式检查（GET 前 8KB）"""
-    try:
-        async with session.get(
-            url,
-            timeout=aiohttp.ClientTimeout(total=3),
-            allow_redirects=True,
-            headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Referer': url.split('?')[0]
-            }
-        ) as response:
-            if response.status != 200:
-                return False
-
-            # 读取前 8KB
-            content = await response.content.read(8192)
-            text = content.decode('utf-8', errors='ignore')
-
-            # 检查 M3U8 格式标记
-            return '#EXTM3U' in text or '#EXTINF' in text or '.ts' in text
-    except:
-        return False
 
 async def validate_url_stage2(session: aiohttp.ClientSession, url: str) -> bool:
     """第二阶段：下载 TS 分片验证真实播放能力"""
@@ -263,14 +238,18 @@ async def main():
                 merged_channels[name] = {
                     'name': name,
                     'group': ch['group'],
-                    'urls': []
+                    'urls': [],
+                    '_seen': set()
                 }
             # 添加 URL（去重）
             for url in ch['urls']:
-                if url not in merged_channels[name]['urls']:
+                if url not in merged_channels[name]['_seen']:
+                    merged_channels[name]['_seen'].add(url)
                     merged_channels[name]['urls'].append(url)
 
     channels_list = list(merged_channels.values())
+    for ch in channels_list:
+        ch.pop('_seen', None)
     total_urls = sum(len(ch['urls']) for ch in channels_list)
 
     print(f"[统计] 合并后:")
@@ -337,7 +316,7 @@ async def main():
         }
     }
 
-    output_file = 'validated-channels.json'
+    output_file = Path(__file__).resolve().parent / 'validated-channels.json'
     with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
 
@@ -347,10 +326,16 @@ async def main():
     print("=" * 60)
     print(f"原始频道数: {len(channels_list)}")
     print(f"可用频道数: {len(validated_channels)}")
-    print(f"频道保留率: {len(validated_channels)/len(channels_list)*100:.1f}%")
+    if channels_list:
+        print(f"频道保留率: {len(validated_channels)/len(channels_list)*100:.1f}%")
+    else:
+        print("频道保留率: 无可统计频道（所有源下载/解析均为空）")
     print(f"测试 URL 数: {tested_count}")
     print(f"可用 URL 数: {stage2_passed_count}")
-    print(f"URL 可用率: {stage2_passed_count/tested_count*100:.1f}%")
+    if tested_count:
+        print(f"URL 可用率: {stage2_passed_count/tested_count*100:.1f}%")
+    else:
+        print("URL 可用率: 无可统计 URL（所有源下载/解析均为空）")
     print()
     print(f"[完成] 结果已保存到: {output_file}")
     print("=" * 60)

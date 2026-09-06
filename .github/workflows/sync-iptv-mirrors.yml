@@ -12,6 +12,7 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -19,21 +20,28 @@ jobs:
       - name: Download IPTV sources
         run: |
           mkdir -p iptv-mirrors
+          FAILED=0
 
           echo "📥 Downloading BurningC4 Chinese-IPTV..."
           curl -fsSL "https://raw.githubusercontent.com/BurningC4/Chinese-IPTV/master/TV-IPV4.m3u" \
-            -o iptv-mirrors/burningc4-chinese-iptv.m3u || echo "Failed to download BurningC4"
+            -o iptv-mirrors/burningc4-chinese-iptv.m3u || { echo "Failed to download BurningC4"; echo "❌ Failed to download BurningC4" >> "$GITHUB_STEP_SUMMARY"; FAILED=1; }
 
           echo "📥 Downloading zbefine IPTV..."
           curl -fsSL "https://raw.githubusercontent.com/zbefine/iptv/main/iptv.m3u" \
-            -o iptv-mirrors/zbefine-iptv.m3u || echo "Failed to download zbefine"
+            -o iptv-mirrors/zbefine-iptv.m3u || { echo "Failed to download zbefine"; echo "❌ Failed to download zbefine" >> "$GITHUB_STEP_SUMMARY"; FAILED=1; }
 
           echo "📥 Downloading suxuang myIPTV..."
           curl -fsSL "https://raw.githubusercontent.com/suxuang/myIPTV/main/ipv6.m3u" \
-            -o iptv-mirrors/suxuang-myiptv.m3u || echo "Failed to download suxuang"
+            -o iptv-mirrors/suxuang-myiptv.m3u || { echo "Failed to download suxuang"; echo "❌ Failed to download suxuang" >> "$GITHUB_STEP_SUMMARY"; FAILED=1; }
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo "❌ One or more IPTV source downloads failed"
+            exit 1
+          fi
 
       - name: Generate index
         run: |
+          DATE=$(date -u '+%Y-%m-%d %H:%M UTC')
           cat > iptv-mirrors/README.md << 'EOF'
           # IPTV 源镜像
 
@@ -60,9 +68,10 @@ jobs:
           https://wfygefjgd.github.io/live-player/iptv-mirrors/suxuang-myiptv.m3u
           ```
 
-          最后更新时间：$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          最后更新时间：__LAST_UPDATED__
           EOF
-
+          # heredoc 保持带引号（正文含反引号不能去引号），用 sed 展开时间戳
+          sed -i "s/__LAST_UPDATED__/$DATE/" iptv-mirrors/README.md
       - name: Commit and push
         run: |
           git config user.name "github-actions[bot]"

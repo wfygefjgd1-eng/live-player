@@ -86,14 +86,17 @@ def parse_m3u(content: str) -> List[Dict]:
             name = normalize_name(pending_name)
             key = name.lower()
             if key not in channels:
-                channels[key] = {"name": name, "group": pending_group, "urls": []}
-            if line not in channels[key]["urls"]:
+                channels[key] = {"name": name, "group": pending_group, "urls": [], "_seen": set()}
+            if line not in channels[key]["_seen"]:
+                channels[key]["_seen"].add(line)
                 channels[key]["urls"].append(line)
             # 央视统一分组
             if re.search(r"cctv", name, re.I) or "央视" in name:
                 channels[key]["group"] = "央视"
             pending_name = None
             pending_group = "其他"
+    for ch in channels.values():
+        ch.pop("_seen", None)
     return list(channels.values())
 
 
@@ -186,7 +189,7 @@ async def validate_all(channels: List[Dict]) -> List[Dict]:
     lock = asyncio.Lock()
 
     async with aiohttp.ClientSession(
-        connector=aiohttp.TCPConnector(limit=CONCURRENT, ssl=False)
+        connector=aiohttp.TCPConnector(limit=CONCURRENT)
     ) as session:
 
         async def one(ch: Dict):
@@ -224,13 +227,16 @@ def merge(sources: List[Tuple[str, List[Dict]]]) -> List[Dict]:
         for ch in chs:
             key = ch["name"].lower()
             if key not in merged:
-                merged[key] = {"name": ch["name"], "group": ch["group"], "urls": []}
+                merged[key] = {"name": ch["name"], "group": ch["group"], "urls": [], "_seen": set()}
             for u in ch["urls"]:
-                if u not in merged[key]["urls"]:
+                if u not in merged[key]["_seen"]:
+                    merged[key]["_seen"].add(u)
                     merged[key]["urls"].append(u)
             # 保留更好的 group
             if priority_score(ch) > priority_score(merged[key]):
                 merged[key]["group"] = ch["group"]
+    for ch in merged.values():
+        ch.pop("_seen", None)
     return list(merged.values())
 
 

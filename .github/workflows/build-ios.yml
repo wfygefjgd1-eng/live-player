@@ -95,13 +95,24 @@ jobs:
           name: TV-go-iOS
           path: TVPlayer-iOS/build/TV-go-v${{ steps.get_version.outputs.version }}-ios.ipa
 
+      - name: Check release notes
+        id: notes
+        run: |
+          NOTES="RELEASE_NOTES_iOS_v${{ steps.get_version.outputs.version }}.md"
+          if [ -f "$NOTES" ]; then
+            echo "notes_path=$NOTES" >> $GITHUB_OUTPUT
+          else
+            echo "notes_path=" >> $GITHUB_OUTPUT
+            echo "No release notes file for v${{ steps.get_version.outputs.version }}, falling back to generated notes"
+          fi
+
       - name: Create Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: TVPlayer-iOS/build/TV-go-v${{ steps.get_version.outputs.version }}-ios.ipa
-          body_path: RELEASE_NOTES_iOS_v${{ steps.get_version.outputs.version }}.md
+          body_path: ${{ steps.notes.outputs.notes_path }}
           name: TV go iOS v${{ steps.get_version.outputs.version }}
-          generate_release_notes: false
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

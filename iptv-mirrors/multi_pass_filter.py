@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # ── 路径 ──────────────────────────────────────────────
-BASE = Path(r"C:\Users\96335\Desktop\TVPlayer")
+BASE = Path(__file__).resolve().parents[1]
 MIRRORS = BASE / "iptv-mirrors"
 IOS_RES = BASE / "TVPlayer-iOS" / "TVPlayer_iOS" / "Resources"
 IOS_SCRIPTS = BASE / "TVPlayer-iOS" / "scripts"

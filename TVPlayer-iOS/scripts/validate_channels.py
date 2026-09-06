@@ -17,15 +17,19 @@ CONCURRENT = 50  # 并发数
 MAX_URLS_PER_CHANNEL = 5  # 每个频道最多保留几个可用源
 
 async def validate_url(session: aiohttp.ClientSession, url: str) -> bool:
-    """验证单个 URL 是否可用"""
+    """验证单个 URL 是否可用（流式 GET 只读首个数据块，避免 HEAD 被 405 拒绝）"""
     try:
-        async with session.head(
+        async with session.get(
             url,
             timeout=aiohttp.ClientTimeout(total=TIMEOUT),
             allow_redirects=True,
             headers={'User-Agent': 'Mozilla/5.0'}
         ) as response:
-            return response.status == 200
+            if response.status >= 400:
+                return False
+            # 只读第一个数据块即认为可达，随 with 块自动关闭连接
+            chunk = await response.content.read(1024)
+            return bool(chunk)
     except:
         return False
 
