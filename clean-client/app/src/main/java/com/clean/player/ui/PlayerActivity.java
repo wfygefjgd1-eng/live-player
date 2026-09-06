@@ -48,7 +48,6 @@ public class PlayerActivity extends AppCompatActivity {
         if (cdn != null && !cdn.isEmpty()) {
             // original app sets referer from systemBean.cdn_header
             headers.put("Referer", cdn);
-            headers.put("referer", cdn);
         }
         headers.put("User-Agent", "Mozilla/5.0 CleanPlayer/1.0");
 

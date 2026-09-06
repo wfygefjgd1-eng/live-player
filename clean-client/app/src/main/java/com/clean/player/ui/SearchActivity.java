@@ -83,7 +83,8 @@ public class SearchActivity extends AppCompatActivity {
 
             @Override
             public void onFailure(@NonNull Call<ApiResponse<VideoListData>> call, @NonNull Throwable t) {
-                Toast.makeText(SearchActivity.this, t.getMessage(), Toast.LENGTH_SHORT).show();
+                String msg = t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName();
+                Toast.makeText(SearchActivity.this, msg, Toast.LENGTH_SHORT).show();
             }
         });
     }

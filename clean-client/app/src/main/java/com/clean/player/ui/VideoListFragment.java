@@ -130,6 +130,7 @@ public class VideoListFragment extends Fragment {
             @Override
             public void onResponse(@NonNull Call<ApiResponse<VideoListData>> call,
                                    @NonNull Response<ApiResponse<VideoListData>> response) {
+                if (!isAdded()) return;
                 swipe.setRefreshing(false);
                 List<VideoItem> items = new ArrayList<>();
                 if (response.isSuccessful() && response.body() != null) {
@@ -149,6 +150,7 @@ public class VideoListFragment extends Fragment {
 
             @Override
             public void onFailure(@NonNull Call<ApiResponse<VideoListData>> call, @NonNull Throwable t) {
+                if (!isAdded()) return;
                 swipe.setRefreshing(false);
                 tvEmpty.setVisibility(View.VISIBLE);
                 Toast.makeText(requireContext(), "加载失败: " + t.getMessage(), Toast.LENGTH_SHORT).show();

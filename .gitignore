@@ -17,4 +17,5 @@ err.log
 bin/
 android-native/.gradle/
 android-native/local.properties
+clean-client/local.properties
 

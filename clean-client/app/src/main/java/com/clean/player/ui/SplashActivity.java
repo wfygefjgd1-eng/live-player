@@ -44,6 +44,7 @@ public class SplashActivity extends AppCompatActivity {
     }
 
     private void boot() {
+        if (isFinishing() || isDestroyed()) return;
         setStatus("线路检测中…");
         String best = pickLine();
         if (best == null) {
@@ -51,8 +52,9 @@ public class SplashActivity extends AppCompatActivity {
             best = LineConfig.DEFAULT_LINKS.get(0);
         }
         LineConfig.setCurrent(best);
-        runOnUiThread(NetManager::rebuild);
+        NetManager.rebuild();
 
+        if (isFinishing() || isDestroyed()) return;
         setStatus("初始化系统信息…");
         try {
             Map<String, Object> body = new HashMap<>();
@@ -83,6 +85,7 @@ public class SplashActivity extends AppCompatActivity {
         }
 
         runOnUiThread(() -> {
+            if (isFinishing() || isDestroyed()) return;
             startActivity(new Intent(this, MainActivity.class));
             finish();
         });
@@ -99,7 +102,7 @@ public class SplashActivity extends AppCompatActivity {
                         .get()
                         .header("User-Agent", "CleanPlayer/1.0")
                         .build();
-                try (Response resp = NetManager.client().newCall(req).execute()) {
+                try (Response resp = NetManager.probeClient().newCall(req).execute()) {
                     if (resp.isSuccessful() || (resp.code() >= 200 && resp.code() < 500)) {
                         // 4xx still means host is reachable for some APIs
                         if (resp.code() != 404) {
@@ -109,8 +112,8 @@ public class SplashActivity extends AppCompatActivity {
                 }
                 // fallback: host root
                 Request root = new Request.Builder().url(base).get().build();
-                try (Response resp = NetManager.client().newCall(root).execute()) {
-                    if (resp.code() > 0) {
+                try (Response resp = NetManager.probeClient().newCall(root).execute()) {
+                    if (resp.isSuccessful()) {
                         return base;
                     }
                 }
