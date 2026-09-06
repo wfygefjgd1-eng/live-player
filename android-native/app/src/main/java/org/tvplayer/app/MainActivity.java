@@ -119,6 +119,8 @@ public class MainActivity extends AppCompatActivity {
     private boolean panelVisible = false;
     private boolean loading = false;
     private int loadGeneration = 0;
+    /** 频道列表请求代次：每次 loadChannels 递增；缓存异步回帖必须校验，防止换源/换融合模式后旧缓存"复活" */
+    private int channelListEpoch = 0;
     private boolean waitingForReady = false;
     private float brightness = 0.5f;
     private long pendingStallTimeoutMs = CHANNEL_SWITCH_TIMEOUT_MS;
@@ -663,6 +665,10 @@ public class MainActivity extends AppCompatActivity {
         loading = true;
         waitingForReady = false;
         cancelStallCheck();
+        // 每次新的列表请求都作废之前发出的缓存回帖（不能复用 loadGeneration：
+        // 紧随其后的 loadChannelsFromMultiSources 会立刻把它 +1）
+        channelListEpoch++;
+        final int cacheEpoch = channelListEpoch;
 
         if (useCache) {
             // 缓存 JSON 可能有几千频道，解析放后台线程，结果回主线程后只在空列表时灌入
@@ -670,14 +676,18 @@ public class MainActivity extends AppCompatActivity {
                 netPool.execute(() -> {
                     List<Channel> cached = storage.loadChannels();
                     mainHandler.post(() -> {
-                        if (channels.isEmpty() && cached != null && !cached.isEmpty()) {
-                            channels.addAll(cached);
-                            reputation.applyToChannels(channels);
-                            adapter.setData(channels);
-                            restoreLastChannelPosition();
-                            status.setText(String.format("已加载 %d 个频道（缓存）", channels.size()));
-                            playCurrent(false, CHANNEL_SWITCH_TIMEOUT_MS);
+                        // 代次校验：期间用户换源/换融合模式（都会走 loadChannels 递增代次）
+                        // 时，这份旧源缓存绝不能灌入并起播
+                        if (cacheEpoch != channelListEpoch || !channels.isEmpty()
+                                || cached == null || cached.isEmpty()) {
+                            return;
                         }
+                        channels.addAll(cached);
+                        reputation.applyToChannels(channels);
+                        adapter.setData(channels);
+                        restoreLastChannelPosition();
+                        status.setText(String.format("已加载 %d 个频道（缓存）", channels.size()));
+                        playCurrent(false, CHANNEL_SWITCH_TIMEOUT_MS);
                     });
                 });
             } catch (Exception ignored) {

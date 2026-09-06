@@ -65,9 +65,19 @@ final class StorageService {
     // 改为 Caches 目录文件 + 原子写入 + 解码结果内存缓存；老版本的 UserDefaults 缓存首次读取时自动迁移。
 
     private var channelsMemo: [Channel]?
+    /// 频道缓存放 Application Support（系统不会清除；Caches 目录会被系统随时清空），
+    /// 并排除 iCloud 备份。目录不存在时惰性创建。
     private var channelsCacheURL: URL {
-        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-        return dir.appendingPathComponent("channels_cache.json")
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let dir = base.appendingPathComponent("TVPlayer", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: dir.path) {
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        let url = dir.appendingPathComponent("channels_cache.json")
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? url.setResourceValues(values)
+        return url
     }
 
     func saveChannels(_ channels: [Channel]) {
@@ -114,10 +124,12 @@ final class StorageService {
                 loaded = channels
             } else if let data = self.defaults.data(forKey: self.kChannels),
                       let channels = try? JSONDecoder().decode([Channel].self, from: data) {
-                // 老版本 UserDefaults 缓存：迁移到文件后清除
+                // 老版本 UserDefaults 缓存：迁移到文件，写成功才清 UD 副本
+                //（写失败时保留副本，下次冷启动还能迁移，否则缓存彻底丢失）
                 loaded = channels
-                try? data.write(to: self.channelsCacheURL, options: .atomic)
-                self.defaults.removeObject(forKey: self.kChannels)
+                if (try? data.write(to: self.channelsCacheURL, options: .atomic)) != nil {
+                    self.defaults.removeObject(forKey: self.kChannels)
+                }
             }
             self.channelsMemo = loaded
             return loaded

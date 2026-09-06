@@ -132,10 +132,10 @@ final class MPVPlaybackEngine {
         if let foregroundObserver {
             NotificationCenter.default.removeObserver(foregroundObserver)
         }
+        // 不需要 join 采样队列：采样 block 通过 guard let self 持有强引用，
+        // deinit 能运行就说明没有任何采样 block 在途（否则引用计数不会归零），
+        // 此时向 samplerQueue 做 sync 反而有自死锁风险（最后一个引用恰在采样线程释放）
         samplerCancelled = true
-        // 等在途采样结束：采样线程可能正持有 mpv 句柄做属性查询，
-        // 不等它就直接 terminate_destroy 会在查询中途拆掉 ctx
-        samplerQueue.sync { }
         if let ctx = mpv {
             // 先摘掉唤醒回调再销毁：terminate_destroy 过程中 mpv 内部线程仍可能
             // 发起最后几次唤醒，回调经 unretained 指针访问已析构对象就是 UAF
@@ -201,16 +201,14 @@ final class MPVPlaybackEngine {
     }
 
     func pause() {
-        eventQueue.async { [weak self] in
-            self?.setFlagProperty("pause", true)
-        }
+        // pause 是属性写、不走 demux 锁，直调立即生效；
+        // 排进 eventQueue 会被阻塞中的 loadfile 挡住最长 20s（UI 状态会先变，声音续播）
+        setFlagProperty("pause", true)
     }
 
     func resume() {
         try? AVAudioSession.sharedInstance().setActive(true)
-        eventQueue.async { [weak self] in
-            self?.setFlagProperty("pause", false)
-        }
+        setFlagProperty("pause", false)
     }
 
     func stop() {
@@ -221,11 +219,9 @@ final class MPVPlaybackEngine {
         snapshotLock.lock()
         lastSnapshot = DiagnosticsSample()
         snapshotLock.unlock()
-        // stop 命令同样可能阻塞在 demux 锁上，派发到事件队列；
-        // FIFO 保证与 play 的先后语义一致（谁后入队谁生效）
-        eventQueue.async { [weak self] in
-            self?.command("stop", args: [])
-        }
+        // stop 必须立即到达 mpv 核心：若排在 eventQueue 里被阻塞的 loadfile 挡住，
+        // 旧频道的画面/声音会多续最长 network-timeout(20s)
+        commandAsync("stop", args: [])
     }
 
     var isPlaying: Bool {
@@ -474,6 +470,21 @@ final class MPVPlaybackEngine {
         if rc < 0 {
             print("[mpv] command '\(commandName)' error: \(String(cString: mpv_error_string(rc)))")
         }
+    }
+
+    /// 异步下达命令：调用立即返回，命令直达 mpv 核心（mpv_command_async 在调用时复制参数）。
+    /// 用于必须绕开 eventQueue 阻塞的紧急指令（如 stop）。
+    private func commandAsync(_ commandName: String, args: [String]) {
+        guard let ctx = mpv else { return }
+        var cargs = args.map { UnsafePointer<CChar>(strdup($0)) }
+        cargs.insert(UnsafePointer<CChar>(strdup(commandName)), at: 0)
+        cargs.append(nil)
+        defer {
+            for ptr in cargs where ptr != nil {
+                free(UnsafeMutablePointer(mutating: ptr!))
+            }
+        }
+        mpv_command_async(ctx, 0, &cargs)
     }
 
     private func getDoubleProperty(_ name: String) -> Double {

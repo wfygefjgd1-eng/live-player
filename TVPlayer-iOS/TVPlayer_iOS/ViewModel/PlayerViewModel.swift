@@ -143,8 +143,11 @@ final class PlayerViewModel: ObservableObject {
     private var lastVolumeIndicatorAt: Date = .distantPast
 
     // MARK: - 分组/浏览序缓存
-    /// channels 或 favorites 变化时置脏；search 词单独作为缓存键
+    /// channels 或 favorites 变化时置脏；search 词单独作为缓存键。
+    /// 两组缓存必须各用各的脏标记：sections(search:) 任何搜索词的重算都会清自己的标记，
+    /// 若共用一个标记，面板 body 的重算会"顺手"清脏，导致 cachedBrowseOrder 陈旧、切台乱跳
     private var sectionsDirty = true
+    private var browseOrderDirty = true
     private var cachedSearchKey: String?
     private var cachedSections: [ChannelSection] = []
     private var cachedBrowseOrder: [Channel] = []
@@ -174,7 +177,10 @@ final class PlayerViewModel: ObservableObject {
 
         // 数据或收藏变化时使分组/浏览序缓存失效（sections(search:)/browseOrderedChannels 读缓存）
         $channels.combineLatest($favorites)
-            .sink { [weak self] _ in self?.sectionsDirty = true }
+            .sink { [weak self] _ in
+                self?.sectionsDirty = true
+                self?.browseOrderDirty = true
+            }
             .store(in: &sectionsCancellables)
 
         // 后台/前台：后台播放关闭时进入后台暂停、回前台恢复
@@ -273,8 +279,20 @@ final class PlayerViewModel: ObservableObject {
                 self.loadChannels(force: true, silent: false, preferActiveOnly: true)
             }
             if self.channels.isEmpty {
-                self.bootstrapMessage = "暂时无法加载频道，网络恢复后自动重试"
+                self.bootstrapMessage = "暂时无法加载频道，将低频自动重试"
                 self.isBootstrapping = false
+            }
+            // 退避耗尽后转 5 分钟一次的保底重试：源站宕机（网络路径始终正常）时
+            // onNetworkBecameAvailable 是边沿触发、永不回调，必须有兜底，否则 App 永远停摆
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 300_000_000_000)
+                guard !Task.isCancelled else { return }
+                if !self.channels.isEmpty {
+                    self.isBootstrapping = false
+                    return
+                }
+                self.bootstrapMessage = "仍无频道，低频重试中..."
+                self.loadChannels(force: true, silent: false, preferActiveOnly: true)
             }
         }
     }
@@ -664,13 +682,14 @@ final class PlayerViewModel: ObservableObject {
 
     /// 与侧栏一致的浏览顺序（收藏→央视→…），上下滑/超时切台都按此序，避免「乱跳」
     func browseOrderedChannels() -> [Channel] {
-        // 缓存浏览序：该方法在每次滑动/自动切台都会调用，
-        // 失效由 $channels/$favorites 的 Combine 订阅统一触发（sectionsDirty）
-        if !sectionsDirty, !cachedBrowseOrder.isEmpty {
+        // 缓存浏览序：该方法在每次滑动/自动切台都会调用，失效由独立脏标记控制
+        // （不能用 sections 的脏标记——面板 body 用任意搜索词重算就会把它清掉）
+        if !browseOrderDirty, !cachedBrowseOrder.isEmpty {
             return cachedBrowseOrder
         }
         let ordered = ensureCCTV1FirstInBrowseOrder(sections(search: "").flatMap(\.channels))
         cachedBrowseOrder = ordered
+        browseOrderDirty = false
         return ordered
     }
 

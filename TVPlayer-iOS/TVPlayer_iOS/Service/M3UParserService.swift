@@ -10,22 +10,24 @@ class M3UParserService {
         options: .caseInsensitive
     )
 
-    /// 取 EXTINF 行「引号外最后一个逗号」之后的文本作为频道名。
-    /// 旧实现取第一个逗号，遇到 group-title="央视,新闻" 这类含逗号属性会把名字截成残片。
+    /// 提取 EXTINF 显示名：
+    /// - 行内含属性引号：取最后一个引号之后的第一个逗号（EXTINF 名字紧跟属性区，
+    ///   既不踩 group-title="央视,新闻" 的属性逗号，也不怕名字后面还有逗号）
+    /// - 行内无引号：取第一个逗号（显示名自身可能含逗号，取最后一个会截断成残片）
     private static func extractDisplayName(from extinfLine: String) -> String {
-        var inQuotes = false
-        var lastComma: String.Index? = nil
-        for i in extinfLine.indices {
-            let c = extinfLine[i]
-            if c == "\"" {
-                inQuotes.toggle()
-            } else if c == "," && !inQuotes {
-                lastComma = i
-            }
+        func name(after index: String.Index) -> String {
+            let name = extinfLine[extinfLine.index(after: index)...].trimmingCharacters(in: .whitespaces)
+            return name.isEmpty ? "未知" : name
         }
-        guard let idx = lastComma else { return "未知" }
-        let name = extinfLine[extinfLine.index(after: idx)...].trimmingCharacters(in: .whitespaces)
-        return name.isEmpty ? "未知" : name
+        if let lastQuote = extinfLine.lastIndex(of: "\"") {
+            let tail = extinfLine[extinfLine.index(after: lastQuote)...]
+            if let comma = tail.firstIndex(of: ",") {
+                return name(after: comma)
+            }
+            // 引号后没有逗号（名字里带引号的罕见行）：回退第一个逗号
+        }
+        guard let comma = extinfLine.firstIndex(of: ",") else { return "未知" }
+        return name(after: comma)
     }
 
     static func parse(_ text: String) -> [Channel] {
