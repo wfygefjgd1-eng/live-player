@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-TVPlayer Android (Kivy) - 兼容 Android 4.4 - 13
+TVPlayer Android (Kivy) - 兼容 Android 5.0 - 13
 手势:
   左右滑动 = 切换频道
   左侧上下滑动 = 亮度
@@ -18,6 +18,7 @@ from kivy.uix.textinput import TextInput
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.gridlayout import GridLayout
+from kivy.uix.popup import Popup
 from kivy.clock import Clock
 from kivy.core.window import Window
 from kivy.storage.jsonstore import JsonStore
@@ -41,6 +42,9 @@ MIRRORS = [
 ]
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Linux; Android 10)"}
+
+# 频道列表最多渲染的条数，超出只显示提示，避免一次创建上千个控件
+MAX_RENDER = 300
 
 
 class Channel(object):
@@ -71,11 +75,12 @@ def parse_m3u(text):
 
 
 class ChannelBtn(Button):
-    def __init__(self, channel, index, on_select, **kw):
+    def __init__(self, channel, index, on_select, on_long_press=None, **kw):
         super(ChannelBtn, self).__init__(**kw)
         self.channel = channel
         self.index = index
         self.on_select = on_select
+        self.on_long_press = on_long_press
         self.background_normal = ""
         self.background_color = (0.12, 0.12, 0.12, 1)
         self.color = (0.9, 0.9, 0.9, 1)
@@ -84,11 +89,43 @@ class ChannelBtn(Button):
         self.halign = "left"
         self.valign = "middle"
         self.text_size = (None, None)
+        self._lp_event = None
+        self._lp_fired = False
         self.bind(on_release=self._click)
 
     def _click(self, *a):
+        if self._lp_fired:
+            self._lp_fired = False
+            return
         if self.on_select:
             self.on_select(self.index)
+
+    def on_touch_down(self, touch):
+        self._lp_fired = False
+        self._cancel_long_press()
+        if self.collide_point(*self.to_widget(*touch.pos)):
+            self._lp_event = Clock.schedule_once(self._fire_long_press, 0.6)
+        return super(ChannelBtn, self).on_touch_down(touch)
+
+    def on_touch_move(self, touch):
+        self._cancel_long_press()
+        return super(ChannelBtn, self).on_touch_move(touch)
+
+    def on_touch_up(self, touch):
+        self._cancel_long_press()
+        return super(ChannelBtn, self).on_touch_up(touch)
+
+    def _cancel_long_press(self):
+        if self._lp_event:
+            Clock.unschedule(self._lp_event)
+            self._lp_event = None
+
+    def _fire_long_press(self, dt):
+        self._lp_event = None
+        if self._lp_fired or not self.parent or not self.on_long_press:
+            return
+        self._lp_fired = True
+        self.on_long_press(self)
 
 
 class TVApp(FloatLayout):
@@ -107,6 +144,8 @@ class TVApp(FloatLayout):
         self._source_idx = 0
         self._fetch_queue = []
         self._current_url = None
+        self._filter_event = None
+        self._old_channels = []
 
         self.fav_store = JsonStore("favorites.json")
         self.hidden_store = JsonStore("hidden.json")
@@ -150,7 +189,7 @@ class TVApp(FloatLayout):
             background_color=(0.08, 0.08, 0.08, 1), foreground_color=(1, 1, 1, 1),
             hint_text_color=(0.5, 0.5, 0.5, 1)
         )
-        self.search.bind(text=lambda *a: self._filter())
+        self.search.bind(text=self._on_search_text)
         self.panel.add_widget(self.search)
 
         self.list_box = GridLayout(cols=1, spacing=dp(2), size_hint_y=None)
@@ -182,7 +221,7 @@ class TVApp(FloatLayout):
 
         # lock button bottom-left
         self.lock_btn = Button(
-            text="🔓", size_hint=(None, None), size=(dp(44), dp(44)),
+            text="开", size_hint=(None, None), size=(dp(44), dp(44)),
             pos_hint={"x": 0.01, "y": 0.02},
             background_normal="", background_color=(0, 0, 0, 0.55),
             color=(1, 1, 1, 1), font_size=dp(16)
@@ -196,7 +235,7 @@ class TVApp(FloatLayout):
 
     def on_touch_down(self, touch):
         if self._locked:
-            if self.lock_btn.collide_point(*touch.pos):
+            if self.lock_btn.collide_point(*self.lock_btn.to_widget(*touch.pos)):
                 return super(TVApp, self).on_touch_down(touch)
             return True
         self._touch_start = (touch.x, touch.y)
@@ -222,7 +261,7 @@ class TVApp(FloatLayout):
 
     def on_touch_up(self, touch):
         if self._locked:
-            if self.lock_btn.collide_point(*touch.pos):
+            if self.lock_btn.collide_point(*self.lock_btn.to_widget(*touch.pos)):
                 return super(TVApp, self).on_touch_up(touch)
             return True
         if not self._touch_start:
@@ -292,7 +331,7 @@ class TVApp(FloatLayout):
 
     def _toggle_lock(self, *a):
         self._locked = not self._locked
-        self.lock_btn.text = "🔒" if self._locked else "🔓"
+        self.lock_btn.text = "锁" if self._locked else "开"
         if self._locked:
             self.panel.opacity = 0
             self.panel.disabled = True
@@ -317,6 +356,12 @@ class TVApp(FloatLayout):
         self.ch_label.text = "%d/%d %s" % (self.current_index + 1, len(self.filtered), ch.name)
         self._highlight_list()
 
+    def _on_search_text(self, *a):
+        # 输入防抖：300ms 后才真正过滤，避免每个按键都重建整个频道列表
+        if self._filter_event:
+            Clock.unschedule(self._filter_event)
+        self._filter_event = Clock.schedule_once(lambda dt: self._filter(), 0.3)
+
     def _filter(self):
         kw = (self.search.text or "").lower()
         result = []
@@ -333,10 +378,16 @@ class TVApp(FloatLayout):
 
     def _update_list(self):
         self.list_box.clear_widgets()
-        for i, ch in enumerate(self.filtered):
+        for i, ch in enumerate(self.filtered[:MAX_RENDER]):
             fav = "★ " if self.fav_store.exists(ch.url) else "▸ "
-            btn = ChannelBtn(ch, i, self.select_channel, text=fav + ch.name)
+            btn = ChannelBtn(ch, i, self.select_channel, self._show_channel_menu, text=fav + ch.name)
             self.list_box.add_widget(btn)
+        if len(self.filtered) > MAX_RENDER:
+            tip = Label(
+                text="仅显示前 %d 条，请输入关键词缩小范围" % MAX_RENDER,
+                size_hint_y=None, height=dp(30), color=(0.6, 0.6, 0.6, 1), font_size=dp(11)
+            )
+            self.list_box.add_widget(tip)
         self._highlight_list()
 
     def _highlight_list(self):
@@ -374,6 +425,7 @@ class TVApp(FloatLayout):
             return
         self._loading = True
         self.status.text = "加载中..."
+        self._old_channels = self.channels
         self.channels = []
         self._fetch_queue = list(DEFAULT_SOURCES)
         self._fetch_next()
@@ -381,7 +433,14 @@ class TVApp(FloatLayout):
     def _fetch_next(self):
         if not self._fetch_queue:
             self._loading = False
-            self._save_cache()
+            if not self.channels and self._old_channels:
+                # 全部源拉取失败：恢复原频道列表，避免用空列表覆盖缓存
+                self.channels = self._old_channels
+                self._filter()
+                self.status.text = "加载失败，保留原频道 %d 个" % len(self.channels)
+                return
+            if self.channels:
+                self._save_cache()
             self._filter()
             if self.filtered:
                 self.current_index = 0
@@ -402,8 +461,13 @@ class TVApp(FloatLayout):
         url = urls[0]
 
         def ok(req, result):
-            text = result.decode("utf-8") if isinstance(result, bytes) else result
-            chs = parse_m3u(text)
+            try:
+                text = result.decode("utf-8", errors="replace") if isinstance(result, bytes) else result
+                chs = parse_m3u(text)
+            except Exception as e:
+                print("解析 %s 失败: %s" % (url, e))
+                self._try_urls(urls[1:])
+                return
             if chs:
                 existing = {c.url for c in self.channels}
                 for c in chs:
@@ -426,6 +490,7 @@ class TVApp(FloatLayout):
         name, url = DEFAULT_SOURCES[self._source_idx]
         self._loading = True
         self.status.text = "切换 %s..." % name
+        self._old_channels = self.channels
         self.channels = []
         self._fetch_queue = [(name, url)]
         self._fetch_next()
@@ -433,6 +498,42 @@ class TVApp(FloatLayout):
     def _toggle_fav(self, *a):
         self._show_fav = not self._show_fav
         self._filter()
+
+    def _show_channel_menu(self, btn):
+        ch = btn.channel
+        content = BoxLayout(orientation="vertical", spacing=dp(4), padding=dp(6))
+        popup = Popup(title=ch.name, content=content, size_hint=(0.7, None), height=dp(210))
+        is_fav = self.fav_store.exists(ch.url)
+
+        def do_fav(*a):
+            try:
+                if is_fav:
+                    self.fav_store.delete(ch.url)
+                else:
+                    self.fav_store.put(ch.url)
+            except Exception:
+                pass
+            popup.dismiss()
+            self._filter()
+
+        def do_hide(*a):
+            try:
+                self.hidden_store.put(ch.url)
+            except Exception:
+                pass
+            popup.dismiss()
+            self._filter()
+
+        for text, cb in (
+            ("取消收藏" if is_fav else "收藏", do_fav),
+            ("隐藏频道", do_hide),
+            ("取消", popup.dismiss),
+        ):
+            b = Button(text=text, size_hint_y=None, height=dp(44),
+                       background_normal="", background_color=(0.05, 0.4, 0.6, 1))
+            b.bind(on_release=cb)
+            content.add_widget(b)
+        popup.open()
 
 
 class TVPlayerApp(App):

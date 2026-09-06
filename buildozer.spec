@@ -4,15 +4,15 @@ package.name = tvplayer
 package.domain = org.tvplayer
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas,json
-source.include_patterns = android_main.py
+source.include_patterns = android_main.py,main.py
 version = 1.0.0
-requirements = python3,kivy==2.2.1
+requirements = python3,kivy==2.2.1,ffpyplayer
 orientation = landscape
 fullscreen = 1
 
-# Android 4.4 (API 19) ~ Android 13 (API 33)
+# Android 5.0 (API 21) ~ Android 13 (API 33)
 android.api = 33
-android.minapi = 19
+android.minapi = 21
 android.ndk = 25b
 android.sdk = 33
 android.archs = arm64-v8a,armeabi-v7a
