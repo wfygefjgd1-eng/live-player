@@ -2,13 +2,17 @@ package org.tvplayer.app;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 public class Channel {
     public final String name;
     public final String group;
     public final String key;
     private final List<String> urls;
+    // 线路查重用 Set：List.contains 是 O(n)，多源融合聚合会退化成 O(n²)
+    private final Set<String> urlSet = new HashSet<>();
 
     public Channel(String name, String url, String group) {
         this(name, group, M3UParser.normalizeName(name), new ArrayList<String>());
@@ -32,7 +36,7 @@ public class Channel {
             return;
         }
         String clean = url.trim();
-        if (clean.isEmpty() || urls.contains(clean)) {
+        if (clean.isEmpty() || !urlSet.add(clean)) {
             return;
         }
         urls.add(clean);

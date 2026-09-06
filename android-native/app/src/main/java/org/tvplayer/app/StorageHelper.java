@@ -74,10 +74,16 @@ public class StorageHelper {
                         urls.add(legacyUrl);
                     }
                 }
+                String key = o.optString("key", "");
+                if (key.trim().isEmpty()) {
+                    // 注意不要写成 optString("key", normalizeName(...))：
+                    // fallback 参数无论 key 是否存在都会急切求值，缓存加载也必跑一遍正则管线
+                    key = M3UParser.normalizeName(o.optString("name", "未知"));
+                }
                 list.add(new Channel(
                         o.optString("name", "未知"),
                         o.optString("group", "未分组"),
-                        o.optString("key", M3UParser.normalizeName(o.optString("name", "未知"))),
+                        key,
                         urls
                 ));
             }

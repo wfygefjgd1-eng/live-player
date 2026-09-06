@@ -32,6 +32,15 @@ public class ChannelAdapter extends RecyclerView.Adapter<ChannelAdapter.VH> {
         notifyDataSetChanged();
     }
 
+    /** 单行替换（如信誉重排），避免全量 notifyDataSetChanged */
+    public void replaceItem(int position, Channel channel) {
+        if (channel == null || position < 0 || position >= data.size()) {
+            return;
+        }
+        data.set(position, channel);
+        notifyItemChanged(position);
+    }
+
     public void setSelected(int index) {
         int old = selected;
         selected = index;

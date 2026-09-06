@@ -2,6 +2,12 @@ plugins {
     id 'com.android.application'
 }
 
+// CI 通过环境变量注入正式 keystore（见 .github/workflows/build-android.yml）；
+// 无密钥时回退 debug 签名，保证 release 产物可直接安装（未签名 APK 真机装不上）
+def ksPath = System.getenv("KEYSTORE_FILE")
+def ksFile = (ksPath != null && !ksPath.trim().isEmpty()) ? rootProject.file(ksPath) : null
+def hasReleaseKeystore = ksFile != null && ksFile.exists()
+
 android {
     compileSdkVersion 33
     buildToolsVersion "33.0.2"
@@ -24,10 +30,22 @@ android {
         targetCompatibility JavaVersion.VERSION_1_8
     }
 
+    signingConfigs {
+        if (hasReleaseKeystore) {
+            release {
+                storeFile ksFile
+                storePassword System.getenv("KEYSTORE_PASSWORD") ?: ""
+                keyAlias System.getenv("KEY_ALIAS") ?: ""
+                keyPassword System.getenv("KEY_PASSWORD") ?: ""
+            }
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            signingConfig hasReleaseKeystore ? signingConfigs.release : signingConfigs.debug
         }
         debug {
             minifyEnabled false

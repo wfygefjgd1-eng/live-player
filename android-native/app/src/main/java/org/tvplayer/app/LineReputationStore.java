@@ -25,6 +25,8 @@ public class LineReputationStore {
     private static final String KEY_PREFERRED = "preferred_v1";
     private static final long BLACKLIST_MS = 24L * 3600L * 1000L;
     private static final int SUCCESS_WEIGHT = 3;
+    // 条目上限：无淘汰的话 entries 只增不减，换线风暴时每次 mark 还全量序列化
+    private static final int MAX_ENTRIES = 2000;
 
     private final SharedPreferences prefs;
     private final Map<String, Entry> entries = new HashMap<>();
@@ -217,6 +219,7 @@ public class LineReputationStore {
 
     private void save() {
         try {
+            pruneToCapacity();
             JSONArray arr = new JSONArray();
             for (Entry e : entries.values()) {
                 JSONObject o = new JSONObject();
@@ -237,6 +240,23 @@ public class LineReputationStore {
                     .putString(KEY_PREFERRED, pref.toString())
                     .apply();
         } catch (Exception ignored) {
+        }
+    }
+
+    /** 超出容量时按最近活跃时间淘汰旧条目 */
+    private void pruneToCapacity() {
+        if (entries.size() <= MAX_ENTRIES) {
+            return;
+        }
+        List<Entry> byActivity = new ArrayList<>(entries.values());
+        Collections.sort(byActivity, (a, b) -> {
+            long la = Math.max(a.lastSuccessAt, a.lastFailAt);
+            long lb = Math.max(b.lastSuccessAt, b.lastFailAt);
+            return Long.compare(lb, la);
+        });
+        entries.clear();
+        for (int i = 0; i < MAX_ENTRIES && i < byActivity.size(); i++) {
+            entries.put(byActivity.get(i).url, byActivity.get(i));
         }
     }
 
