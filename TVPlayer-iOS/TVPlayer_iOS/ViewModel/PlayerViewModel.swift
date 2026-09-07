@@ -114,6 +114,8 @@ final class PlayerViewModel: ObservableObject {
     /// 自动切换提示弹窗（唯一，任意时刻最多一个）。
     /// non-nil 即显示；nil 表示无弹窗。保证「始终只有一个按钮」。
     @Published var autoSwitchPrompt: AutoSwitchPrompt? = nil
+    /// 自动切换提示弹窗的自动消失任务：提示只是告知+可选项，不能强迫用户点按钮
+    private var autoSwitchPromptTask: Task<Void, Never>?
 
     // 统一任务管理
     private var osdTask: Task<Void, Never>?
@@ -1024,7 +1026,12 @@ final class PlayerViewModel: ObservableObject {
 
     // MARK: - 自动切换提示弹窗
 
+    /// 提示弹窗自动消失时长：约 2 秒。超时 = 保持现状（不关闭/不开启自动切换）
+    private static let autoSwitchPromptAutoDismissNs: UInt64 = 2_000_000_000
+
     /// 展示自动切换提示，唯一性保证：已存在则不再新弹（直接覆盖内容，仍是唯一按钮）。
+    /// 约 2 秒后自动消失——原实现只靠「下一条线路出画」清除，而弹窗恰恰在线路切换失败时
+    /// 弹出，可能永远等不到出画，变成强迫用户点按钮。
     private func presentAutoSwitchPrompt(kind: AutoSwitchPrompt.Kind) {
         let message: String
         switch kind {
@@ -1034,10 +1041,26 @@ final class PlayerViewModel: ObservableObject {
             message = "长时间无声无画面，已停止自动切换"
         }
         autoSwitchPrompt = AutoSwitchPrompt(kind: kind, message: message)
+        scheduleAutoSwitchPromptDismiss()
     }
 
-    /// 消除弹窗（下一条出画/用户关闭时）
+    private func scheduleAutoSwitchPromptDismiss() {
+        autoSwitchPromptTask?.cancel()
+        guard let prompt = autoSwitchPrompt else { return }
+        autoSwitchPromptTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: Self.autoSwitchPromptAutoDismissNs)
+            guard let self, !Task.isCancelled else { return }
+            // 只清除仍是这一条的弹窗：期间若弹出了新提示（present 会重置计时器），不能误清
+            if self.autoSwitchPrompt == prompt {
+                self.autoSwitchPrompt = nil
+            }
+        }
+    }
+
+    /// 消除弹窗（下一条出画/用户关闭时），并取消自动消失计时
     func dismissAutoSwitchPrompt() {
+        autoSwitchPromptTask?.cancel()
+        autoSwitchPromptTask = nil
         autoSwitchPrompt = nil
     }
 
@@ -1389,6 +1412,7 @@ final class PlayerViewModel: ObservableObject {
         retryTask?.cancel()
         playTask?.cancel()
         blacklistRefreshTask?.cancel()
+        autoSwitchPromptTask?.cancel()
         DispatchQueue.main.async {
             UIApplication.shared.isIdleTimerDisabled = false
         }
