@@ -50,6 +50,10 @@ final class MPVPlaybackEngine {
     private var _reportedPlaying = false
     private var _samplerCancelled = true
     private var _volumeState: Float = 1
+    /// play/stop 代次：过滤 eventQueue 里已排队但未执行的旧 play 块与旧采样链。
+    /// 只有布尔标志时，stop() 之后旧 play 块会把 stoppedByOwner 改回 false 并对
+    /// 已放弃的旧 URL 重新 loadfile（已切走的频道"复活"出声出画）
+    private var _generation = 0
 
     private var mpv: OpaquePointer? {
         get { stateLock.lock(); defer { stateLock.unlock() }; return _mpv }
@@ -74,6 +78,17 @@ final class MPVPlaybackEngine {
     private var volumeState: Float {
         get { stateLock.lock(); defer { stateLock.unlock() }; return _volumeState }
         set { stateLock.lock(); defer { stateLock.unlock() }; _volumeState = newValue }
+    }
+    private var generation: Int {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _generation }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _generation = newValue }
+    }
+    /// 锁内一次性推进代次并返回新值（play/stop 共用，保证原子性）
+    private func bumpGeneration() -> Int {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        _generation += 1
+        return _generation
     }
 
     // 事件循环：mpv 只允许单线程 wait_event，唤醒回调也只在此队列排队
@@ -148,6 +163,8 @@ final class MPVPlaybackEngine {
     // MARK: - Public API（与旧 VLCPlaybackEngine 保持同一形状）
 
     func play(url: URL, drawable: UIView, volume: Float, softwareDecode: Bool) {
+        // 推进代次：使已排队未执行的旧 play 块、旧采样链全部失效
+        let myGeneration = bumpGeneration()
         stoppedByOwner = true
         reportedPlaying = false
         samplerCancelled = true
@@ -172,6 +189,8 @@ final class MPVPlaybackEngine {
         // 队列 FIFO 保证与 stop() 的先后语义一致。
         eventQueue.async { [weak self] in
             guard let self else { return }
+            // 排队期间发生过 stop() 或更新的 play()：本块整体作废
+            guard self.generation == myGeneration else { return }
             guard self.ensureMpvInitialized(layer: layer) else {
                 self.notifyError("mpv 初始化失败")
                 return
@@ -186,6 +205,8 @@ final class MPVPlaybackEngine {
             self.setVolumeProperty(volume)
             // 确保视频输出开启：后台会设 vid=no，若残留会导致加载新文件后有声音无画面
             self.setStringProperty("vid", "auto")
+            // 只有最新代次才能清 stoppedByOwner 并 loadfile：防止 stop() 后旧块"复活"旧频道
+            guard self.generation == myGeneration else { return }
             self.stoppedByOwner = false
             self.command("loadfile", args: [url.absoluteString, "replace"])
             self.notifyState("正在打开")
@@ -194,7 +215,7 @@ final class MPVPlaybackEngine {
             // 新文件加载后会一直停在暂停（画面冻结、无声音），必须显式恢复播放。
             self.setFlagProperty("pause", false)
 
-            // 开启后台采样循环
+            // 开启后台采样循环（scheduleNextSample 内部按代次校验，杜绝双采样链）
             self.samplerCancelled = false
             self.scheduleNextSample()
         }
@@ -212,6 +233,8 @@ final class MPVPlaybackEngine {
     }
 
     func stop() {
+        // 推进代次：作废队列中的旧 play 块与旧采样链
+        bumpGeneration()
         stoppedByOwner = true
         reportedPlaying = false
         samplerCancelled = true
@@ -222,11 +245,6 @@ final class MPVPlaybackEngine {
         // stop 必须立即到达 mpv 核心：若排在 eventQueue 里被阻塞的 loadfile 挡住，
         // 旧频道的画面/声音会多续最长 network-timeout(20s)
         commandAsync("stop", args: [])
-    }
-
-    var isPlaying: Bool {
-        // 只读采样快照（≤0.5s 延迟），不在调用线程直查 mpv——那可能阻塞在 demux 锁上
-        diagnosticsSample().stateText == "播放中"
     }
 
     var volume: Float {
@@ -337,7 +355,17 @@ final class MPVPlaybackEngine {
                 notifyError("mpv 播放器报告解码或媒体错误")
             }
         case MPV_EVENT_SHUTDOWN:
-            mpv = nil
+            // mpv core 致命退出。只置 nil 会泄漏句柄与内部线程，且旧 ctx 的唤醒
+            // 回调仍携带指向本引擎的指针继续 fire；必须摘回调 + 销毁句柄。
+            if let ctx = mpv {
+                mpv = nil
+                mpv_set_wakeup_callback(ctx, nil, nil)
+                DispatchQueue.global(qos: .utility).async {
+                    mpv_terminate_destroy(ctx)
+                }
+            }
+            // 通知上层：核心自杀属于硬失败，起播超时/换线兜底需要接管
+            notifyError("mpv 核心异常退出")
         case MPV_EVENT_LOG_MESSAGE:
             if let msg = UnsafePointer<mpv_event_log_message>(OpaquePointer(event.pointee.data)) {
                 let text = msg.pointee.text.flatMap { String(cString: $0) } ?? ""
@@ -382,8 +410,9 @@ final class MPVPlaybackEngine {
     // MARK: - 后台采样
 
     private func scheduleNextSample() {
+        let myGeneration = generation
         samplerQueue.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            guard let self, !self.samplerCancelled else { return }
+            guard let self, !self.samplerCancelled, self.generation == myGeneration else { return }
             self.collectSampleOnBackground()
             self.scheduleNextSample()
         }

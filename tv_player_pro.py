@@ -69,13 +69,21 @@ class M3UParser:
                 name_match = re.search(r",(.+?)$", line)
                 name = name_match.group(1).strip() if name_match else "未知"
                 j = i + 1
+                url = None
                 while j < len(lines):
                     nxt = lines[j].strip()
+                    # 遇到下一个 #EXTINF 说明当前频道没有 URL，不能抢走下一个频道的行
+                    if nxt.startswith("#EXTINF:"):
+                        break
                     if nxt and not nxt.startswith("#"):
-                        channels.append(Channel(name, nxt, group, logo))
+                        url = nxt
                         break
                     j += 1
-                i = j + 1
+                if url:
+                    channels.append(Channel(name, url, group, logo))
+                    i = j + 1
+                else:
+                    i = max(j, i + 1)
             else:
                 i += 1
         return channels
@@ -375,7 +383,11 @@ class FavoritesManager:
     def _load(self):
         try:
             if FAVORITES_FILE.exists():
-                return json.loads(FAVORITES_FILE.read_text(encoding="utf-8"))
+                raw = json.loads(FAVORITES_FILE.read_text(encoding="utf-8"))
+                if isinstance(raw, list):
+                    # 兼容 tv_player_tk.py 的纯频道名列表格式（无 URL），两版共用 favorites.json
+                    return [f if isinstance(f, dict) else {"name": str(f), "url": "", "group": "", "logo": ""}
+                            for f in raw if f]
         except: pass
         return []
 
@@ -383,21 +395,22 @@ class FavoritesManager:
         FAVORITES_FILE.write_text(json.dumps(self.favorites, ensure_ascii=False), encoding="utf-8")
 
     def add(self, ch):
-        if ch.url not in [f["url"] for f in self.favorites]:
+        if ch.url not in [f.get("url") for f in self.favorites]:
             self.favorites.append(ch.to_dict())
             self._save()
             return True
         return False
 
     def remove(self, url):
-        self.favorites = [f for f in self.favorites if f["url"] != url]
+        self.favorites = [f for f in self.favorites if f.get("url") != url]
         self._save()
 
     def is_favorite(self, url):
-        return url in [f["url"] for f in self.favorites]
+        return url in [f.get("url") for f in self.favorites]
 
     def get_all(self):
-        return [Channel(f["name"], f["url"], f.get("group", "")) for f in self.favorites]
+        return [Channel(f.get("name", ""), f["url"], f.get("group", ""))
+                for f in self.favorites if f.get("url")]
 
 class HiddenManager:
     def __init__(self):

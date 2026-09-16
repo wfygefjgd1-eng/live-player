@@ -47,7 +47,6 @@ final class NetworkService {
     private let monitor = NWPathMonitor()
     private let monitorQueue = DispatchQueue(label: "NetworkMonitor")
     private var isNetworkAvailable = true
-    private var pendingRetry: (() -> Void)?
     private var cacheCleanupObservers: [NSObjectProtocol] = []
 
     private init() {
@@ -90,31 +89,9 @@ final class NetworkService {
     private func startNetworkMonitor() {
         monitor.pathUpdateHandler = { [weak self] path in
             guard let self else { return }
-            let available = path.status == .satisfied
-            let wasUnavailable = !self.isNetworkAvailable
-            self.isNetworkAvailable = available
-
-            if available && wasUnavailable {
-                let retry = self.pendingRetry
-                self.pendingRetry = nil
-                DispatchQueue.main.async {
-                    retry?()
-                }
-            }
+            self.isNetworkAvailable = path.status == .satisfied
         }
         monitor.start(queue: monitorQueue)
-    }
-
-    /// 注册网络恢复时的重试回调
-    func onNetworkAvailable(_ retry: @escaping () -> Void) {
-        monitorQueue.async { [weak self] in
-            guard let self else { return }
-            if self.isNetworkAvailable {
-                DispatchQueue.main.async { retry() }
-            } else {
-                self.pendingRetry = { retry() }
-            }
-        }
     }
 
     func fetch(url: String) async throws -> String {
@@ -139,12 +116,15 @@ final class NetworkService {
         if http.expectedContentLength > Self.maxBodyBytes {
             throw NetworkFetchError.parseEmpty
         }
-        var buffer = [UInt8]()
-        buffer.reserveCapacity(256 * 1024)
+        var data = Data()
+        data.reserveCapacity(256 * 1024)
+        var byteStream = bytes
         do {
-            for try await byte in bytes {
-                buffer.append(byte)
-                if buffer.count > Self.maxBodyBytes {
+            // 分块读取：逐字节迭代 AsyncBytes 每字节都要穿越一次异步管线，
+            // MB 级源慢一个数量级，且被镜像竞速成倍放大
+            while let chunk = try await byteStream.readData(upToCount: Self.readChunkSize) {
+                data.append(chunk)
+                if data.count > Self.maxBodyBytes {
                     throw NetworkFetchError.parseEmpty
                 }
             }
@@ -153,7 +133,6 @@ final class NetworkService {
         } catch {
             throw NetworkFetchError.badResponse
         }
-        let data = Data(buffer)
         // 超大源（几十 MB）拒绝解析，避免内存占用过高；正常 M3U 都在 KB 级
         if data.count > Self.maxBodyBytes {
             throw NetworkFetchError.parseEmpty
@@ -177,6 +156,8 @@ final class NetworkService {
 
     /// M3U 源最大字节数：5MB 足够容纳最大公开源（几十万行），再大视为异常拒绝
     private static let maxBodyBytes = 5 * 1024 * 1024
+    /// 分块读取粒度：64KB 在内存与迭代开销间平衡
+    private static let readChunkSize = 64 * 1024
 
     /// 单一源 + 镜像竞速：GitHub 系地址自动展开镜像并发请求，任一候选返回可用文本即胜出。
     /// 被墙域名常见表现是挂到超时而非快速失败，串行回退会拖慢启动，故并发。
@@ -202,52 +183,5 @@ final class NetworkService {
         }
         guard let text else { throw NetworkFetchError.allFailed }
         return text
-    }
-
-    /// 所有候选源竞速：谁先解析出频道用谁
-    func fetchWithCandidates(urls: [String]) async -> (channels: [Channel], errorMessage: String?) {
-        guard !urls.isEmpty else {
-            return ([], NetworkFetchError.allFailed.errorDescription)
-        }
-
-        // 全部并发竞速：raceFetch 已对所有源完整尝试，取最快成功结果；
-        // 返回 nil 表示全部失败，无需再串行重试（会重复请求并拖慢加载）
-        if let raced = await raceFetch(urls: urls) {
-            return (raced, nil)
-        }
-        return ([], NetworkFetchError.allFailed.errorDescription)
-    }
-
-    /// 并发请求所有 URL，取最快返回的频道列表
-    private func raceFetch(urls: [String]) async -> [Channel]? {
-        await withTaskGroup(of: [Channel]?.self) { group in
-            for url in urls {
-                group.addTask {
-                    do {
-                        let body = try await self.fetchTextWithMirrors(url: url)
-                        let parsed = await self.parseOffMain(body)
-                        return parsed.isEmpty ? nil : parsed
-                    } catch {
-                        return nil
-                    }
-                }
-            }
-            // 取第一个成功结果
-            for await result in group {
-                if let channels = result, !channels.isEmpty {
-                    group.cancelAll()
-                    return channels
-                }
-            }
-            return nil
-        }
-    }
-
-    private func parseOffMain(_ body: String) async -> [Channel] {
-        await withCheckedContinuation { cont in
-            DispatchQueue.global(qos: .userInitiated).async {
-                cont.resume(returning: M3UParserService.parse(body))
-            }
-        }
     }
 }

@@ -33,10 +33,19 @@ final class StorageService {
 
     private typealias BlacklistRecords = [String: Date]
 
+    /// 黑名单内存缓存：黑名单读取在播放热路径上（每条线路一次），
+    /// 每次都 JSONDecoder 全量解码 + UserDefaults plist 落盘会阻塞调用线程。
+    /// 仅在 queue 的 barrier 块内读写。
+    private var blacklistMemo: BlacklistRecords?
+
     /// Reads the current format and migrates the old permanent string array on first access.
     private func loadBlacklistRecords() -> BlacklistRecords {
+        if let memo = blacklistMemo {
+            return memo
+        }
         if let data = defaults.data(forKey: kBlacklistedLines),
            let records = try? JSONDecoder().decode(BlacklistRecords.self, from: data) {
+            blacklistMemo = records
             return records
         }
 
@@ -48,13 +57,12 @@ final class StorageService {
         for line in legacy {
             records[line] = expiry
         }
-        if let data = try? JSONEncoder().encode(records) {
-            defaults.set(data, forKey: kBlacklistedLines)
-        }
+        saveBlacklistRecords(records)
         return records
     }
 
     private func saveBlacklistRecords(_ records: BlacklistRecords) {
+        blacklistMemo = records
         if let data = try? JSONEncoder().encode(records) {
             defaults.set(data, forKey: kBlacklistedLines)
         }
@@ -66,19 +74,20 @@ final class StorageService {
 
     private var channelsMemo: [Channel]?
     /// 频道缓存放 Application Support（系统不会清除；Caches 目录会被系统随时清空），
-    /// 并排除 iCloud 备份。目录不存在时惰性创建。
-    private var channelsCacheURL: URL {
+    /// 并排除 iCloud 备份。目录检查/属性写入只做一次，避免每次访问都做文件系统调用。
+    /// 所有访问都在 queue 的 barrier 块内，惰性初始化无并发竞争。
+    private lazy var channelsCacheURL: URL = {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let dir = base.appendingPathComponent("TVPlayer", isDirectory: true)
         if !FileManager.default.fileExists(atPath: dir.path) {
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         }
-        var url = dir.appendingPathComponent("channels_cache.json")
+        let url = dir.appendingPathComponent("channels_cache.json")
         var values = URLResourceValues()
         values.isExcludedFromBackup = true
         try? url.setResourceValues(values)
         return url
-    }
+    }()
 
     func saveChannels(_ channels: [Channel]) {
         queue.async(flags: .barrier) { [weak self] in
@@ -105,12 +114,17 @@ final class StorageService {
         }
     }
 
-    func loadChannels() -> [Channel] {
-        // 用 barrier：本方法会写 channelsMemo，与 saveChannels 的写互斥
-        queue.sync(flags: .barrier) { [weak self] in
-            guard let self else { return [] }
+    func loadChannels(completion: @escaping ([Channel]) -> Void) {
+        // 异步加载：缓存可达数 MB（数千频道 × 多线路），
+        // 同步读文件 + JSON 解码会卡住调用线程（冷启动时是主线程）
+        queue.async(flags: .barrier) { [weak self] in
+            guard let self else {
+                completion([])
+                return
+            }
             if let memo = self.channelsMemo {
-                return memo
+                completion(memo)
+                return
             }
             // 检查数据版本，必要时迁移
             let savedVersion = self.defaults.integer(forKey: self.kDataVersion)
@@ -132,7 +146,7 @@ final class StorageService {
                 }
             }
             self.channelsMemo = loaded
-            return loaded
+            completion(loaded)
         }
     }
 
@@ -218,12 +232,12 @@ final class StorageService {
 
     // MARK: - 黑名单管理
 
+    /// 过期条目只在内存视图里过滤；持久化修剪延迟到下一次写入，
+    /// 读取路径不再做「顺手清理回写」（曾导致主线程 barrier 内 JSON encode + plist 落盘）
     func loadBlacklistedLines() -> Set<String> {
         queue.sync(flags: .barrier) {
             let now = Date()
-            let active = loadBlacklistRecords().filter { $0.value > now }
-            saveBlacklistRecords(active)
-            return Set(active.keys)
+            return Set(loadBlacklistRecords().filter { $0.value > now }.keys)
         }
     }
 
@@ -250,6 +264,7 @@ final class StorageService {
     /// 清空黑名单（换源时调用）
     func clearBlacklist() {
         queue.sync(flags: .barrier) {
+            blacklistMemo = nil
             defaults.removeObject(forKey: kBlacklistedLines)
         }
     }

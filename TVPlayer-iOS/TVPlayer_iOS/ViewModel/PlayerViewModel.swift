@@ -126,7 +126,6 @@ final class PlayerViewModel: ObservableObject {
     private var blacklistRefreshTask: Task<Void, Never>?
 
     private var lastVolumeTranslation: CGFloat = 0
-    private var lastSilentSwitchAt: Date = .distantPast
     private var lastChannelSwitchAt: Date = .distantPast
     private let channelSwitchDebounceInterval: TimeInterval = 0.3  // 300ms 防抖
     private var autoRecoverChannelHops = 0
@@ -201,40 +200,42 @@ final class PlayerViewModel: ObservableObject {
         restoreSources()
         lastEntrySourceReloadAt = Date()
 
-        // ① 缓存 / Bundle 立刻出画
+        // ① 缓存 / Bundle 立刻出画（异步加载：缓存可达数 MB，读盘+解码不上主线程）
         // ② 后台按当前活动源刷新（默认 DEFAULT_SOURCE_URL，不再走 JSON 旁路）
-        if applyQuickStartChannels() {
-            loadChannels(force: true, silent: true, preferActiveOnly: true)
-        } else {
-            beginBootstrapLoad()
+        applyQuickStartChannels { [weak self] quickStarted in
+            guard let self else { return }
+            if quickStarted {
+                self.loadChannels(force: true, silent: true, preferActiveOnly: true)
+            } else {
+                self.beginBootstrapLoad()
+            }
         }
     }
 
-    /// 快速启动：用户缓存 → Bundle 预筛列表
+    /// 快速启动：用户缓存 → Bundle 预筛列表。缓存异步加载，回调在主线程。
+    private func applyQuickStartChannels(completion: @escaping (Bool) -> Void) {
+        storage.loadChannels { [weak self] cached in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                if tryStartWith(cached) || tryStartWith(loadChannelsFromBundle() ?? []) {
+                    completion(true)
+                } else {
+                    completion(false)
+                }
+            }
+        }
+    }
+
     @discardableResult
-    private func applyQuickStartChannels() -> Bool {
-        let cached = storage.loadChannels()
-        if !cached.isEmpty {
-            rawChannels = cached
-            channels = applyRules(cached)
-            if !channels.isEmpty {
-                restoreLastChannelPosition()
-                isBootstrapping = false
-                playCurrent(showOSD: false, resetTried: true)
-                return true
-            }
-        }
-        if let bundleChannels = loadChannelsFromBundle(), !bundleChannels.isEmpty {
-            rawChannels = bundleChannels
-            channels = applyRules(bundleChannels)
-            if !channels.isEmpty {
-                restoreLastChannelPosition()
-                isBootstrapping = false
-                playCurrent(showOSD: false, resetTried: true)
-                return true
-            }
-        }
-        return false
+    private func tryStartWith(_ list: [Channel]) -> Bool {
+        guard !list.isEmpty else { return false }
+        rawChannels = list
+        channels = applyRules(list)
+        guard !channels.isEmpty else { return false }
+        restoreLastChannelPosition()
+        isBootstrapping = false
+        playCurrent(showOSD: false, resetTried: true)
+        return true
     }
 
     // MARK: - 加载逻辑
@@ -416,8 +417,9 @@ final class PlayerViewModel: ObservableObject {
     }
 
     private func bumpPlayerLayout() {
+        // epoch 自增触发 objectWillChange → 观察 vm 的 SwiftUI 视图整体重算。
+        // 原先还 post 一个 .tvPlayerNeedsRelayout 通知，但全工程没有任何观察者，纯 no-op，已删
         playerLayoutEpoch &+= 1
-        NotificationCenter.default.post(name: .tvPlayerNeedsRelayout, object: nil)
     }
 
     func bumpLayoutForRemount() {

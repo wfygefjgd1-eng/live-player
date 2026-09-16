@@ -76,7 +76,6 @@ final class PlayerEngine: ObservableObject {
     /// 本次 play 是否已用过 mpv 回退（每次 play() 重置，无永久回退状态）
     private var fallbackUsed = false
 
-    private var stallWatchEnabled = false
     private var diagnosticsTask: Task<Void, Never>?
     private var stallCheckTask: Task<Void, Never>?
     private var avDiagnosticsTask: Task<Void, Never>?
@@ -88,6 +87,8 @@ final class PlayerEngine: ObservableObject {
     private var playStartedAt: Date = .distantPast
     /// 30 秒无声无画兜底看门狗
     private var silentStallTask: Task<Void, Never>?
+    /// 用户主动暂停：暂停期间不触发「长时间无声无画面」误报
+    private var userPaused = false
     private var currentURLString = ""
     private var recentStalls: [Date] = []
     private var lastStallAt: Date = .distantPast
@@ -229,6 +230,7 @@ final class PlayerEngine: ObservableObject {
         let token = playToken
         activePlayToken = token
         fallbackUsed = false
+        userPaused = false
         resetState(for: token)
         currentURL = url
         currentURLString = url.absoluteString
@@ -321,7 +323,10 @@ final class PlayerEngine: ObservableObject {
         startLiveDiagnostics(token: token)
         startAVDiagnostics(token: token)
 
-        guard lineTimeoutEnabled else { return }
+        // 起播超时与「自动换线」开关解耦：超时必须照常触发 finishFailure
+        // （isSwitching 复位、错误外显），只是「自动切线」这一步交给
+        // onStartupTimeout 里由 lineTimeoutEnabled 决定——否则关掉自动换线的
+        // 用户遇到死流会永久停在「正在加载」转圈
         let timeoutNs = Self.avPlayerStartupTimeoutNs
         avStartupTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: timeoutNs)
@@ -345,6 +350,25 @@ final class PlayerEngine: ObservableObject {
         guard playToken == activePlayToken, activeBackend == .avPlayer else { return }
         if !fallbackUsed, let url = currentURL, !Self.requiresMPV(url) {
             fallbackUsed = true
+            // 后端切换必须按「新后端」重置就绪态：否则 isReady 仍为 true，
+            // mpv 出画后 reportReady 在 guard !isReady 处早退 → onReady 不再触发、
+            // startStallCheck（mpv 唯一的卡顿计数）永不启动 → mpv 卡死时画面
+            // 永久冻结、无自动换线、无任何 UI 反馈
+            isReady = false
+            isSwitching = true
+            failureRecorded = false
+            avRenderedConsecutive = 0
+            consecutiveBufferSeconds = 0
+            lowSpeedReported = false
+            startupPeakBuffer = 0
+            lastAVTotalBytes = 0
+            lastAVSampleTime = .distantPast
+            lastBufferedEndAt = -1
+            lastBufferedSampleAt = .distantPast
+            // 看门狗在 AVPlayer 出画时已被取消：mpv 起播窗口重新武装
+            if !userPaused {
+                startSilentStallWatchdog()
+            }
             startMPV(url: url, token: playToken, asFallback: true)
             return
         }
@@ -395,7 +419,8 @@ final class PlayerEngine: ObservableObject {
         )
         startLiveDiagnostics(token: token)
 
-        guard lineTimeoutEnabled else { return }
+        // 起播超时与「自动换线」开关解耦（同 startAVPlayer）：关掉自动换线也必须有
+        // 失败出口，避免死流下 isSwitching 永久为 true、UI 永久「正在加载」
         let timeoutNs = Self.startupTimeoutNs(for: url)
         mpvStartupTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: timeoutNs)
@@ -464,10 +489,8 @@ final class PlayerEngine: ObservableObject {
         let fireOnReady = { [weak self] in
             self?.onReady?()
             WindowVideoSurface.shared.rebindPlayer()
-            self?.stallWatchEnabled = false
             self?.scheduleTask(named: "readyProtect", token: token, timeout: Self.readyProtectNs) {
                 guard let self else { return }
-                self.stallWatchEnabled = true
                 if self.activeBackend == .mpv {
                     self.startStallCheck(token: token)
                 }
@@ -511,22 +534,30 @@ final class PlayerEngine: ObservableObject {
     }
 
     func pause() {
+        userPaused = true
         if activeBackend == .mpv {
             mpvEngine.pause()
         } else {
             avPlayer.pause()
         }
         isPlaying = false
+        // 暂停期间「无声无画」是预期行为：取消 30s 看门狗，恢复时若仍在起播窗口再武装
+        cancelSilentStallWatchdog()
     }
 
     func resume() {
         guard hasCurrentMedia else { return }
+        userPaused = false
         if activeBackend == .mpv {
             mpvEngine.resume()
         } else {
             avPlayer.play()
         }
         isPlaying = true
+        if !isReady {
+            // 仍在起播窗口：恢复看门狗，死流依旧有 30s 兜底
+            startSilentStallWatchdog()
+        }
         WindowVideoSurface.shared.rebindPlayer()
     }
 
@@ -566,11 +597,13 @@ final class PlayerEngine: ObservableObject {
     }
 
     /// 30 秒无声无画兜底：启动一个后台看门狗，若 30s 内声画一直未流动则回调。
+    /// 用户主动暂停期间不触发——暂停必然「无声无画」，误报会弹出误导性提示。
     func startSilentStallWatchdog() {
         silentStallTask?.cancel()
         silentStallTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 30_000_000_000)
-            guard let self, !Task.isCancelled, !self.isAudioVideoFlowing(), self.hasCurrentMedia else { return }
+            guard let self, !Task.isCancelled, !self.userPaused,
+                  !self.isAudioVideoFlowing(), self.hasCurrentMedia else { return }
             self.onSilentStall30s?()
         }
     }
@@ -635,7 +668,6 @@ final class PlayerEngine: ObservableObject {
         isReady = false
         isSwitching = false
         shouldShowDiagnostics = false
-        stallWatchEnabled = false
         failureRecorded = false
         lastValidSpeedSampleAt = .distantPast
         observedSpeedKBps = 0

@@ -16,9 +16,9 @@ PRESET_SOURCES = [
     ("Guovin 自动筛选源（推荐）", "https://raw.githubusercontent.com/Guovin/iptv-api/gd/output/result.m3u"),
     ("vbskycn 双栈源", "https://raw.githubusercontent.com/vbskycn/iptv/master/tv/iptv4.m3u"),
     ("fanmingming IPv6 源", "https://raw.githubusercontent.com/fanmingming/live/main/tv/m3u/ipv6.m3u"),
-    ("BurningC4 中国源", "https://wfygefjgd.github.io/live-player/iptv-mirrors/burningc4-chinese-iptv.m3u"),
-    ("zbefine 2026 维护源", "https://wfygefjgd.github.io/live-player/iptv-mirrors/zbefine-iptv.m3u"),
-    ("suxuang IPv6 源", "https://wfygefjgd.github.io/live-player/iptv-mirrors/suxuang-myiptv.m3u"),
+    ("BurningC4 中国源", "https://wfygefjgd1-eng.github.io/live-player/iptv-mirrors/burningc4-chinese-iptv.m3u"),
+    ("zbefine 2026 维护源", "https://wfygefjgd1-eng.github.io/live-player/iptv-mirrors/zbefine-iptv.m3u"),
+    ("suxuang IPv6 源", "https://wfygefjgd1-eng.github.io/live-player/iptv-mirrors/suxuang-myiptv.m3u"),
 ]
 
 def download_m3u(url, timeout=30):

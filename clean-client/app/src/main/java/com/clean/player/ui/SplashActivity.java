@@ -3,7 +3,6 @@ package com.clean.player.ui;
 import android.content.Intent;
 import android.os.Bundle;
 import android.widget.TextView;
-import android.widget.Toast;
 
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
@@ -17,6 +16,7 @@ import com.clean.player.util.DeviceUtil;
 import com.clean.player.util.Prefs;
 import com.google.gson.Gson;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -46,23 +46,51 @@ public class SplashActivity extends AppCompatActivity {
     private void boot() {
         if (isFinishing() || isDestroyed()) return;
         setStatus("线路检测中…");
-        String best = pickLine();
-        if (best == null) {
-            setStatus("线路不可用，使用默认线路");
-            best = LineConfig.DEFAULT_LINKS.get(0);
+        String probed = pickLine();
+
+        // 候选顺序：探测命中的线路优先，其余线路兜底；
+        // 仅当 systemInfo 成功时才持久化线路，坏线（如被劫持返回 200 的静态页）不会被记住
+        List<String> candidates = new ArrayList<>(LineConfig.all());
+        if (probed != null) {
+            candidates.remove(probed);
+            candidates.add(0, probed);
         }
-        LineConfig.setCurrent(best);
-        NetManager.rebuild();
+
+        String chosen = null;
+        for (String base : candidates) {
+            if (isFinishing() || isDestroyed()) return;
+            setStatus("初始化系统信息…");
+            NetManager.useBaseUrl(base);
+            SystemInfo info = fetchSystemInfo(base);
+            if (info != null) {
+                chosen = base;
+                break;
+            }
+        }
+        if (chosen == null) {
+            // 全部线路拉取失败：用默认线路进主界面（内存生效，不持久化坏线）
+            chosen = LineConfig.DEFAULT_LINKS.get(0);
+            NetManager.useBaseUrl(chosen);
+        } else {
+            LineConfig.setCurrent(chosen);
+        }
 
         if (isFinishing() || isDestroyed()) return;
-        setStatus("初始化系统信息…");
+        runOnUiThread(() -> {
+            if (isFinishing() || isDestroyed()) return;
+            startActivity(new Intent(this, MainActivity.class));
+            finish();
+        });
+    }
+
+    private SystemInfo fetchSystemInfo(String base) {
         try {
             Map<String, Object> body = new HashMap<>();
             body.put("device_id", DeviceUtil.deviceId());
             body.put("clipboard_text", "");
             body.put("app_code", "clean");
             body.put("channel_code", "");
-            body.put("domain", best);
+            body.put("domain", base);
             body.put("ad_method", "none");
             body.put("device_info", DeviceUtil.deviceInfo());
             body.put("device_information", DeviceUtil.deviceInfo());
@@ -78,17 +106,13 @@ public class SplashActivity extends AppCompatActivity {
                 if (info.token != null && info.token.token != null) {
                     Prefs.put(Prefs.USER_TOKEN, info.token.token);
                 }
+                return info;
             }
         } catch (Exception e) {
-            // continue even if system endpoint shape differs
+            // try next line
             e.printStackTrace();
         }
-
-        runOnUiThread(() -> {
-            if (isFinishing() || isDestroyed()) return;
-            startActivity(new Intent(this, MainActivity.class));
-            finish();
-        });
+        return null;
     }
 
     private String pickLine() {
@@ -96,18 +120,16 @@ public class SplashActivity extends AppCompatActivity {
         for (String base : lines) {
             try {
                 setStatus("检测: " + base);
-                // ping relative path xl/p
+                // ping relative path xl/p：仅 2xx 视为可用 —— 4xx/静态页可能是被劫持的坏线，
+                // 收紧判定避免选中劫持页并持久化导致每次启动先撞死线
                 Request req = new Request.Builder()
                         .url(base + "xl/p")
                         .get()
                         .header("User-Agent", "CleanPlayer/1.0")
                         .build();
                 try (Response resp = NetManager.probeClient().newCall(req).execute()) {
-                    if (resp.isSuccessful() || (resp.code() >= 200 && resp.code() < 500)) {
-                        // 4xx still means host is reachable for some APIs
-                        if (resp.code() != 404) {
-                            return base;
-                        }
+                    if (resp.isSuccessful()) {
+                        return base;
                     }
                 }
                 // fallback: host root

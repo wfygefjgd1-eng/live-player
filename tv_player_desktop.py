@@ -60,6 +60,23 @@ HTTP_READ_TIMEOUT = 10
 PREF_DIR = Path.home() / ".tvplayer_android_port"
 PREF_DIR.mkdir(parents=True, exist_ok=True)
 
+# 频道线路跳过规则：统一读 channel_rules.json（channel_rules_manager.py），
+# 与 Android/iOS 端共用同一份规则；文件缺失或加载失败时回退到下方内置规则
+_RULES_MANAGER = None
+
+
+def _get_rules_manager():
+    global _RULES_MANAGER
+    if _RULES_MANAGER is None:
+        try:
+            from channel_rules_manager import ChannelRulesManager
+            base = Path(__file__).resolve().parent
+            cfg = base if (base / "channel_rules.json").exists() else PREF_DIR
+            _RULES_MANAGER = ChannelRulesManager(cfg)
+        except Exception:
+            _RULES_MANAGER = False
+    return _RULES_MANAGER or None
+
 
 # =============================================================================
 # Channel — 对应 Channel.java
@@ -553,7 +570,7 @@ class PlayerEngine:
             return None
         req_id = uuid.uuid4().int % 100000
         payload = (json.dumps({"command": ["get_property", name], "request_id": req_id}) + "\n").encode("utf-8")
-        resp = self._ipc_call(payload, timeout=0.3)
+        resp = self._ipc_call(payload, timeout=0.3, request_id=req_id)
         if resp is None:
             return None
         try:
@@ -565,51 +582,106 @@ class PlayerEngine:
     def _cmd(self, command: list) -> bool:
         if not self.ipc_name or not self.is_alive():
             return False
-        payload = (json.dumps({"command": command}) + "\n").encode("utf-8")
-        return self._ipc_call(payload, timeout=0.2) is not None
+        req_id = uuid.uuid4().int % 100000
+        payload = (json.dumps({"command": command, "request_id": req_id}) + "\n").encode("utf-8")
+        return self._ipc_call(payload, timeout=0.2, request_id=req_id) is not None
 
-    def _ipc_call(self, payload: bytes, timeout: float = 0.3) -> Optional[bytes]:
+    def _ipc_call(self, payload: bytes, timeout: float = 0.3, request_id=None) -> Optional[bytes]:
         """IPC 调用并等待响应"""
         if os.name == "nt":
-            return self._ipc_call_windows(payload, timeout)
-        return self._ipc_call_unix(payload, timeout)
+            return self._ipc_call_windows(payload, timeout, request_id)
+        return self._ipc_call_unix(payload, timeout, request_id)
 
-    def _ipc_call_windows(self, payload: bytes, timeout: float) -> Optional[bytes]:
+    @staticmethod
+    def _match_ipc_response(pending: bytes, request_id):
+        """从缓冲中找出带匹配 request_id 的响应行，跳过 mpv 主动推送的事件行。
+        返回 (响应行, 剩余缓冲)。"""
+        while b"\n" in pending:
+            line, rest = pending.split(b"\n", 1)
+            line = line.strip()
+            if not line:
+                pending = rest
+                continue
+            if request_id is None:
+                return line, rest
+            try:
+                obj = json.loads(line.decode("utf-8", "ignore"))
+            except Exception:
+                pending = rest
+                continue
+            if isinstance(obj, dict) and obj.get("request_id") == request_id:
+                return line, rest
+            pending = rest
+        return None, pending
+
+    def _ipc_call_windows(self, payload: bytes, timeout: float, request_id=None) -> Optional[bytes]:
         try:
+            kernel32 = ctypes.windll.kernel32
             GENERIC_WRITE = 0x40000000
             GENERIC_READ = 0x80000000
             OPEN_EXISTING = 3
-            h = ctypes.windll.kernel32.CreateFileW(
+            h = kernel32.CreateFileW(
                 self.ipc_name, GENERIC_WRITE | GENERIC_READ, 0, None, OPEN_EXISTING, 0, None
             )
             if h in (-1, 0xFFFFFFFF):
                 return None
-            written = ctypes.c_ulong(0)
-            ok = ctypes.windll.kernel32.WriteFile(
-                h, payload, len(payload), ctypes.byref(written), None
-            )
-            if not ok:
-                ctypes.windll.kernel32.CloseHandle(h)
+            try:
+                written = ctypes.c_ulong(0)
+                if not kernel32.WriteFile(h, payload, len(payload), ctypes.byref(written), None):
+                    return None
+                buf = ctypes.create_string_buffer(4096)
+                read = ctypes.c_ulong(0)
+                avail = ctypes.c_ulong(0)
+                deadline = time.monotonic() + timeout
+                pending = b""
+                # PeekNamedPipe 轮询避免 mpv 卡死时 ReadFile 永久阻塞
+                while time.monotonic() < deadline:
+                    if not kernel32.PeekNamedPipe(h, None, 0, None, ctypes.byref(avail), None):
+                        return None
+                    if avail.value == 0:
+                        time.sleep(0.01)
+                        continue
+                    if not kernel32.ReadFile(h, buf, 4096, ctypes.byref(read), None):
+                        return None
+                    if read.value == 0:
+                        continue
+                    pending += buf.raw[:read.value]
+                    line, pending = self._match_ipc_response(pending, request_id)
+                    if line is not None:
+                        return line
                 return None
-            buf = ctypes.create_string_buffer(4096)
-            read = ctypes.c_ulong(0)
-            ctypes.windll.kernel32.ReadFile(h, buf, 4096, ctypes.byref(read), None)
-            ctypes.windll.kernel32.CloseHandle(h)
-            return buf.raw[:read.value] if read.value > 0 else None
+            finally:
+                kernel32.CloseHandle(h)
         except Exception:
             return None
 
-    def _ipc_call_unix(self, payload: bytes, timeout: float) -> Optional[bytes]:
+    def _ipc_call_unix(self, payload: bytes, timeout: float, request_id=None) -> Optional[bytes]:
+        s = None
         try:
             s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            deadline = time.monotonic() + timeout
             s.settimeout(timeout)
             s.connect(self.ipc_name)
             s.sendall(payload)
-            resp = s.recv(4096)
-            s.close()
-            return resp if resp else None
+            pending = b""
+            while time.monotonic() < deadline:
+                s.settimeout(max(0.01, deadline - time.monotonic()))
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                pending += chunk
+                line, pending = self._match_ipc_response(pending, request_id)
+                if line is not None:
+                    return line
+            return None
         except Exception:
             return None
+        finally:
+            if s is not None:
+                try:
+                    s.close()
+                except Exception:
+                    pass
 
 
 # =============================================================================
@@ -1544,6 +1616,10 @@ class MainActivity:
     def should_skip_channel_line(
         self, key: str, index: int, url: str
     ) -> bool:
+        mgr = _get_rules_manager()
+        if mgr is not None:
+            return mgr.should_skip(key, index)
+        # 内置兜底规则（与 channel_rules.json 默认值一致）
         if key == "cctv10":
             return index == 0
         if key == "cctv14":

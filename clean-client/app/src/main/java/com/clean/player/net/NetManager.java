@@ -43,8 +43,13 @@ public final class NetManager {
     }
 
     public static synchronized void rebuild() {
+        useBaseUrl(LineConfig.current());
+    }
+
+    /** 用指定 base 构建 ApiService（不改持久化的当前线路），选线成功前的临时构建用 */
+    public static synchronized void useBaseUrl(String baseUrl) {
         Retrofit retrofit = new Retrofit.Builder()
-                .baseUrl(LineConfig.current())
+                .baseUrl(LineConfig.ensureSlash(baseUrl))
                 .client(client)
                 .addConverterFactory(GsonConverterFactory.create())
                 .build();

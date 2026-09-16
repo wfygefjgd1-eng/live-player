@@ -40,10 +40,9 @@ import com.google.android.exoplayer2.ExoPlayer;
 import com.google.android.exoplayer2.MediaItem;
 import com.google.android.exoplayer2.Player;
 import com.google.android.exoplayer2.ui.PlayerView;
+import com.google.android.exoplayer2.util.MimeTypes;
 
-import java.io.BufferedReader;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.ArrayList;
@@ -53,6 +52,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -82,7 +82,10 @@ public class MainActivity extends AppCompatActivity {
     private static final long SILENT_AUDIO_CHECK_MS = 8000L;          // 8s 后再查无声，减少误切
     private static final long READY_PROTECT_MS = 2500L;               // 刚就绪保护期，避免误切
     private static final int AUTO_RECOVER_MAX_CHANNELS = 25;
-    private static final int MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
+    // 真实字节上限（原先按 char 计数，UTF-8 中文源实际可读 ~3 倍体积）
+    private static final int MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
+    // 全局并发 HTTP 上限：fast 模式两级扇出后可达 60-80 个请求同时读入内存，低端盒子会 OOM
+    private static final int MAX_HTTP_CONCURRENCY = 5;
 
     private PlayerView playerView;
     private ExoPlayer player;
@@ -101,6 +104,8 @@ public class MainActivity extends AppCompatActivity {
             Math.max(2, Math.min(4, Runtime.getRuntime().availableProcessors() - 1)));
     // 镜像竞速专用池：不能与 netPool 共用，否则池内 await 会把有限线程全部占死（starvation）
     private final ExecutorService mirrorPool = Executors.newCachedThreadPool();
+    // 并发 HTTP 信号量：镜像竞速/多源拉取共用，防止无界并发把内存打爆
+    private final Semaphore httpLimiter = new Semaphore(MAX_HTTP_CONCURRENCY);
 
     private ChannelAdapter adapter;
     private AudioManager audioManager;
@@ -118,6 +123,8 @@ public class MainActivity extends AppCompatActivity {
     private int currentSourceIndex = 0;
     private boolean panelVisible = false;
     private boolean loading = false;
+    /** 用户主动暂停：onStart 恢复时尊重该意图，不强制续播 */
+    private boolean userPaused = false;
     private int loadGeneration = 0;
     /** 频道列表请求代次：每次 loadChannels 递增；缓存异步回帖必须校验，防止换源/换融合模式后旧缓存"复活" */
     private int channelListEpoch = 0;
@@ -295,7 +302,10 @@ public class MainActivity extends AppCompatActivity {
                     autoSwitchingSource = false;
                     cancelStallCheck();
                     cancelPreferLineTask();
-                    switchToNextPlayableSource("线路失败", true, true);
+                    // 断网时不判"线路失败"：否则会把完全正常的 URL 硬拉黑 24h
+                    boolean offline = !hasNetworkConnection();
+                    switchToNextPlayableSource(
+                            offline ? "网络连接失败" : "线路失败", true, !offline);
                 });
             }
         });
@@ -404,8 +414,10 @@ public class MainActivity extends AppCompatActivity {
                 }
                 if (player != null) {
                     if (player.isPlaying()) {
+                        userPaused = true;
                         player.pause();
                     } else {
+                        userPaused = false;
                         player.play();
                     }
                 }
@@ -827,6 +839,14 @@ public class MainActivity extends AppCompatActivity {
                 .setNegativeButton("关闭", null)
                 .create();
 
+        // SHOW_FORCED 弹出的 IME 必须 app 自行收回，否则键盘残留在播放画面上
+        dialog.setOnDismissListener(d -> {
+            InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+            if (imm != null && input.getWindowToken() != null) {
+                imm.hideSoftInputFromWindow(input.getWindowToken(), 0);
+            }
+        });
+
         final int[] selectedIndex = {checked};
 
         fusionButton.setOnClickListener(v -> showFusionModeDialog(fusionButton));
@@ -1026,20 +1046,20 @@ public class MainActivity extends AppCompatActivity {
             if (code < 200 || code >= 300) {
                 return null;
             }
-            try (BufferedReader br = new BufferedReader(
-                    new InputStreamReader(conn.getInputStream(), "UTF-8"))) {
-                StringBuilder sb = new StringBuilder();
-                String line;
-                int total = 0;
-                // 响应体上限 10MB：防止异常大响应把内存打爆
-                while ((line = br.readLine()) != null) {
-                    total += line.length() + 1;
+            try (InputStream is = conn.getInputStream();
+                 java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream()) {
+                byte[] buf = new byte[8192];
+                long total = 0;
+                int n;
+                // 按真实字节计上限（原先按 char 计数，UTF-8 中文源实际可读 ~3 倍体积）
+                while ((n = is.read(buf)) != -1) {
+                    total += n;
                     if (total > MAX_RESPONSE_BYTES) {
                         break;
                     }
-                    sb.append(line).append('\n');
+                    bos.write(buf, 0, n);
                 }
-                return sb.toString();
+                return bos.toString("UTF-8");
             }
         } finally {
             conn.disconnect();
@@ -1069,11 +1089,19 @@ public class MainActivity extends AppCompatActivity {
                 new java.util.concurrent.atomic.AtomicInteger(candidates.size());
         for (String cand : candidates) {
             mirrorPool.execute(() -> {
-                if (winner.get() != null) {
+                try {
+                    // 全局限流：fast 模式两级扇出后可达 60-80 个请求，无界并发会 OOM
+                    httpLimiter.acquire();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
                     if (remaining.decrementAndGet() == 0) done.countDown();
                     return;
                 }
                 try {
+                    // 拿到许可后再查胜者：winner 已定则不再下载，省流量省内存
+                    if (winner.get() != null) {
+                        return;
+                    }
                     String body = httpGet(cand);
                     if (body != null && !body.isEmpty()) {
                         if (winner.compareAndSet(null, body)) {
@@ -1082,6 +1110,7 @@ public class MainActivity extends AppCompatActivity {
                     }
                 } catch (Exception ignored) {
                 } finally {
+                    httpLimiter.release();
                     if (remaining.decrementAndGet() == 0) {
                         done.countDown();
                     }
@@ -1303,6 +1332,13 @@ public class MainActivity extends AppCompatActivity {
         if (channels.isEmpty() || currentIndex < 0 || currentIndex >= channels.size()) {
             return;
         }
+        if (player == null) {
+            // Activity 已销毁（onDestroy 后残留回调触发）：直接终止。
+            // 否则 setMediaItem NPE 被 catch 后会进入换线链，把正常线路误写进 24h 黑名单
+            waitingForReady = false;
+            autoSwitchingSource = false;
+            return;
+        }
         Channel channel = channels.get(currentIndex);
         // 信誉重排：好线靠前、黑名单后置
         List<String> ordered = reputation.orderedURLs(channel.getUrls(), channel.key);
@@ -1376,6 +1412,7 @@ public class MainActivity extends AppCompatActivity {
         playbackToken++;
         waitingForReady = true;
         autoSwitchingSource = false;
+        userPaused = false;
         currentPlaybackReachedReady = false;
         readyAtMs = 0L;
         consecutiveBufferEvents = 0;
@@ -1388,7 +1425,7 @@ public class MainActivity extends AppCompatActivity {
         scheduleStallCheck(timeoutMs);
 
         try {
-            player.setMediaItem(MediaItem.fromUri(Uri.parse(url)));
+            player.setMediaItem(buildMediaItem(url));
             player.prepare();
             player.play();
             if (showOsd) {
@@ -1400,6 +1437,30 @@ public class MainActivity extends AppCompatActivity {
             cancelStallCheck();
             switchToNextPlayableSource("线路失败", true, true);
         }
+    }
+
+    /** 构造带显式 MIME 的 MediaItem：无扩展名 URL 在 ExoPlayer 里会被当 progressive 解析，
+     *  对 #EXTM3U 文本 sniff 必然失败 → 起播失败 → 误进信誉拉黑；显式按 HLS 解析 */
+    private MediaItem buildMediaItem(String url) {
+        Uri uri = Uri.parse(url);
+        String path = uri.getPath() == null ? "" : uri.getPath().toLowerCase();
+        String mimeType;
+        if (path.endsWith(".m3u8") || path.endsWith(".m3u")) {
+            mimeType = MimeTypes.APPLICATION_M3U8;
+        } else if (path.endsWith(".mpd")) {
+            mimeType = MimeTypes.APPLICATION_MPD;
+        } else if (path.endsWith(".mp4") || path.endsWith(".m4v") || path.endsWith(".mov")) {
+            mimeType = MimeTypes.VIDEO_MP4;
+        } else if (path.endsWith(".ts")) {
+            mimeType = MimeTypes.VIDEO_MP2T;
+        } else {
+            // 无扩展名：IPTV 直播地址绝大多数是 HLS
+            mimeType = MimeTypes.APPLICATION_M3U8;
+        }
+        return new MediaItem.Builder()
+                .setUri(uri)
+                .setMimeType(mimeType)
+                .build();
     }
 
     private void playCurrent(boolean showOsd) {
@@ -1473,8 +1534,9 @@ public class MainActivity extends AppCompatActivity {
         cancelSilentAudioCheck();
         cancelPreferLineTask();
         triedLineIndices.add(currentSourceIndex);
-        // 写入信誉：失败线 24h 拉黑，避免明天再踩
-        if (currentSourceIndex >= 0 && currentSourceIndex < count) {
+        // 写入信誉：失败线 24h 拉黑，避免明天再踩。
+        // 断网/弱网时不写：路由器抖动 5 分钟能把好线成批拉黑，频道直接消失一天
+        if (currentSourceIndex >= 0 && currentSourceIndex < count && hasNetworkConnection()) {
             String failUrl = channel.getUrls().get(currentSourceIndex);
             reputation.markFailure(failUrl, channel.key, true);
         }
@@ -1552,15 +1614,36 @@ public class MainActivity extends AppCompatActivity {
             }
             Channel filtered = new Channel(source.name, source.group, source.key, null);
             List<String> urls = source.getUrls();
+            boolean sawBlacklistOnlySkip = false;
             for (int i = 0; i < urls.size(); i++) {
                 String url = urls.get(i);
-                if (url != null && hiddenLines.contains(url.trim())) {
+                if (url == null || url.trim().isEmpty()) {
                     continue;
                 }
-                if (shouldSkipChannelLine(source.key, i, url)) {
+                if (hiddenLines.contains(url.trim())) {
+                    continue;
+                }
+                if (isStructurallyInvalidUrl(url)) {
+                    continue;
+                }
+                if (reputation != null && reputation.isBlacklisted(url)) {
+                    sawBlacklistOnlySkip = true;
                     continue;
                 }
                 filtered.addUrl(url);
+            }
+            // 兜底（对齐 LineReputationStore.filterPlayable 的回退语义）：
+            // 全部线路只因 24h 自动黑名单被过滤时保留原线路参与排序，
+            // 否则断网期间一次误拉黑就会让频道从列表里成批消失一整天
+            if (filtered.getSourceCount() == 0 && sawBlacklistOnlySkip) {
+                for (String url : urls) {
+                    if (url == null || url.trim().isEmpty()
+                            || hiddenLines.contains(url.trim())
+                            || isStructurallyInvalidUrl(url)) {
+                        continue;
+                    }
+                    filtered.addUrl(url);
+                }
             }
             if (filtered.getSourceCount() > 0) {
                 output.add(filtered);
@@ -1569,30 +1652,42 @@ public class MainActivity extends AppCompatActivity {
         return output;
     }
 
-    /**
-     * 判断是否应跳过该线路（黑名单 / 无效协议 / 质量过滤）
-     * 对齐 iOS applyRules + M3UParser 质量筛选逻辑
-     */
-    private boolean shouldSkipChannelLine(String key, int index, String url) {
-        if (url == null || url.trim().isEmpty()) {
+    /** 结构性非法（空/协议/测试占位链接）：与黑名单不同，这类线路没有兜底价值 */
+    private boolean isStructurallyInvalidUrl(String url) {
+        if (url == null) {
             return true;
         }
-        // 黑名单线路：跳过（保留至少一条兜底）
-        if (reputation != null && reputation.isBlacklisted(url)) {
-            return true;
-        }
-        // 无效协议（rtmp 核心库不支持，见 isPlayableUrl）
         String u = url.trim().toLowerCase();
+        if (u.isEmpty()) {
+            return true;
+        }
         if (!u.startsWith("http://") && !u.startsWith("https://")
                 && !u.startsWith("rtsp://")) {
             return true;
         }
-        // 测试/示例链接
-        if (u.contains("test") || u.contains("demo") || u.contains("example")) {
-            return true;
+        return isPlaceholderUrl(u);
+    }
+
+    /** 测试/示例占位链接：按路径段/主机段整体匹配，避免 "latest"/"contest" 这类子串误杀 */
+    private boolean isPlaceholderUrl(String u) {
+        try {
+            java.net.URI uri = java.net.URI.create(u);
+            String host = uri.getHost() == null ? "" : uri.getHost();
+            String path = uri.getPath() == null ? "" : uri.getPath();
+            String query = uri.getQuery() == null ? "" : uri.getQuery();
+            String whole = host + "/" + path + "/" + query;
+            for (String seg : whole.split("[/=&?.:%_-]")) {
+                if (seg.isEmpty()) {
+                    continue;
+                }
+                if (seg.equals("test") || seg.equals("tests") || seg.equals("demo")
+                        || seg.equals("demos") || seg.equals("example") || seg.equals("examples")
+                        || seg.equals("teststream") || seg.equals("demostream")) {
+                    return true;
+                }
+            }
+        } catch (Exception ignored) {
         }
-        // 端口不做过滤：IPTV 大量使用 :8000/:8081/:9981 等非标准端口，
-        // 误杀代价远大于收益，交给播放失败 + 信誉机制自然淘汰
         return false;
     }
 
@@ -1693,7 +1788,8 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onStart() {
         super.onStart();
-        if (player != null) {
+        // 尊重用户主动暂停：Home/锁屏往返不应把用户暂停的播放强行续上
+        if (player != null && !userPaused) {
             player.setPlayWhenReady(true);
         }
     }
@@ -1702,7 +1798,7 @@ public class MainActivity extends AppCompatActivity {
     protected void onStop() {
         cancelStallCheck();
         cancelSilentAudioCheck();
-                if (player != null) {
+        if (player != null) {
             player.setPlayWhenReady(false);
         }
         super.onStop();
@@ -1714,6 +1810,13 @@ public class MainActivity extends AppCompatActivity {
         cancelSilentAudioCheck();
         cancelFakeReadyWatchdog();
         cancelPreferLineTask();
+        // 推进所有代次并清空主线程队列：后台拉取完成后 post 回来的
+        // applyLoadedChannels/playCurrent 不能再在已销毁的 Activity 上执行，
+        // 否则 player==null NPE 被 catch 后触发换线风暴，成批误拉黑正常线路 24h
+        loadGeneration++;
+        channelListEpoch++;
+        playbackToken++;
+        mainHandler.removeCallbacksAndMessages(null);
         if (hideIndicatorRunnable != null) {
             mainHandler.removeCallbacks(hideIndicatorRunnable);
         }
@@ -1962,6 +2065,33 @@ public class MainActivity extends AppCompatActivity {
             boolean firstBatchPosted = false;
             int attempt = 0;
 
+            if (!"smart".equals(mode) && fetchUrls.size() > 1) {
+                // complete/balanced：并行拉全部源再按提交顺序合并。
+                // 原串行逐源最坏 12s×N，10 源约 2 分钟白屏且没有首批缓解
+                List<java.util.concurrent.Future<List<Channel>>> futures = new ArrayList<>();
+                for (String fullUrl : fetchUrls) {
+                    futures.add(mirrorPool.submit(() -> fetchOneSource(fullUrl)));
+                }
+                for (java.util.concurrent.Future<List<Channel>> f : futures) {
+                    if (gen != loadGeneration) {
+                        f.cancel(true);
+                        continue;
+                    }
+                    List<Channel> sourceChannels;
+                    try {
+                        sourceChannels = f.get(90, java.util.concurrent.TimeUnit.SECONDS);
+                    } catch (Exception e) {
+                        f.cancel(true);
+                        continue;
+                    }
+                    if (sourceChannels.isEmpty()) {
+                        continue;
+                    }
+                    successCount++;
+                    mergeIntoByKey(byKey, sourceChannels);
+                }
+                allChannels = new ArrayList<>(byKey.values());
+            } else {
             for (String fullUrl : fetchUrls) {
                 if (gen != loadGeneration) return;
                 attempt++;
@@ -1975,30 +2105,7 @@ public class MainActivity extends AppCompatActivity {
                     continue;
                 }
                 successCount++;
-                for (Channel channel : sourceChannels) {
-                    if (channel.getUrls().isEmpty()) continue;
-                    String k = channel.key != null && !channel.key.isEmpty()
-                            ? channel.key
-                            : channel.name.trim().toLowerCase();
-                    if (byKey.containsKey(k)) {
-                        Channel existing = byKey.get(k);
-                        for (String u : channel.getUrls()) {
-                            if (isQualityUrl(u)) {
-                                existing.addUrl(u);
-                            }
-                        }
-                    } else {
-                        Channel copy = new Channel(channel.name, channel.group, channel.key, null);
-                        for (String u : channel.getUrls()) {
-                            if (isQualityUrl(u)) {
-                                copy.addUrl(u);
-                            }
-                        }
-                        if (copy.getSourceCount() > 0) {
-                            byKey.put(k, copy);
-                        }
-                    }
-                }
+                mergeIntoByKey(byKey, sourceChannels);
                 allChannels = new ArrayList<>(byKey.values());
 
                 if ("smart".equals(mode) && !firstBatchPosted && !allChannels.isEmpty()) {
@@ -2010,6 +2117,7 @@ public class MainActivity extends AppCompatActivity {
                         applyLoadedChannels(firstBatch, sc, totalSources, true);
                     });
                 }
+            }
             }
 
             List<Channel> mergedChannels = mergeChannelsByName(new ArrayList<>(byKey.values()));
@@ -2118,8 +2226,14 @@ public class MainActivity extends AppCompatActivity {
 
         String lower = url.toLowerCase();
 
-        // 排除测试链接
-        if (lower.contains("test") || lower.contains("demo") || lower.contains("example")) {
+        // 排除非 http(s)/rtsp 协议（rtmp 核心库不支持）
+        if (!lower.startsWith("http://") && !lower.startsWith("https://")
+                && !lower.startsWith("rtsp://")) {
+            return false;
+        }
+
+        // 排除测试/示例占位链接（按段匹配，不误杀含 test 子串的合法地址）
+        if (isPlaceholderUrl(lower)) {
             return false;
         }
 
@@ -2128,9 +2242,35 @@ public class MainActivity extends AppCompatActivity {
             return false;
         }
 
-        // 只接受常见协议（rtmp 核心库不支持）
-        return lower.startsWith("http://") || lower.startsWith("https://") ||
-               lower.startsWith("rtsp://");
+        return true;
+    }
+
+    /** 单个源的频道按 key 聚合进 byKey（质量过滤后合并线路） */
+    private void mergeIntoByKey(java.util.Map<String, Channel> byKey, List<Channel> sourceChannels) {
+        for (Channel channel : sourceChannels) {
+            if (channel.getUrls().isEmpty()) continue;
+            String k = channel.key != null && !channel.key.isEmpty()
+                    ? channel.key
+                    : channel.name.trim().toLowerCase();
+            if (byKey.containsKey(k)) {
+                Channel existing = byKey.get(k);
+                for (String u : channel.getUrls()) {
+                    if (isQualityUrl(u)) {
+                        existing.addUrl(u);
+                    }
+                }
+            } else {
+                Channel copy = new Channel(channel.name, channel.group, channel.key, null);
+                for (String u : channel.getUrls()) {
+                    if (isQualityUrl(u)) {
+                        copy.addUrl(u);
+                    }
+                }
+                if (copy.getSourceCount() > 0) {
+                    byKey.put(k, copy);
+                }
+            }
+        }
     }
 
     /**

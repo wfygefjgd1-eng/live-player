@@ -31,6 +31,13 @@ public class LineReputationStore {
     private final SharedPreferences prefs;
     private final Map<String, Entry> entries = new HashMap<>();
     private final Map<String, String> preferredByChannel = new HashMap<>();
+    // entries 的写（主线程 mark）与读快照（saver 线程 doSave）之间的互斥
+    private final Object lock = new Object();
+    // 节流合并：换线风暴时连续 mark 不再每次在主线程全量序列化 2000 条 JSON
+    private final java.util.concurrent.ScheduledExecutorService saver =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
+    private final java.util.concurrent.atomic.AtomicBoolean savePending =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
 
     public LineReputationStore(Context context) {
         prefs = context.getApplicationContext().getSharedPreferences(PREF, Context.MODE_PRIVATE);
@@ -80,16 +87,18 @@ public class LineReputationStore {
         if (u.isEmpty()) {
             return;
         }
-        Entry e = entries.get(u);
-        if (e == null) {
-            e = new Entry(u);
-        }
-        e.successCount++;
-        e.lastSuccessAt = System.currentTimeMillis();
-        e.blacklistedUntil = 0;
-        entries.put(u, e);
-        if (channelKey != null && !channelKey.isEmpty()) {
-            preferredByChannel.put(channelKey, u);
+        synchronized (lock) {
+            Entry e = entries.get(u);
+            if (e == null) {
+                e = new Entry(u);
+            }
+            e.successCount++;
+            e.lastSuccessAt = System.currentTimeMillis();
+            e.blacklistedUntil = 0;
+            entries.put(u, e);
+            if (channelKey != null && !channelKey.isEmpty()) {
+                preferredByChannel.put(channelKey, u);
+            }
         }
         save();
     }
@@ -99,18 +108,20 @@ public class LineReputationStore {
         if (u.isEmpty()) {
             return;
         }
-        Entry e = entries.get(u);
-        if (e == null) {
-            e = new Entry(u);
-        }
-        e.failCount++;
-        e.lastFailAt = System.currentTimeMillis();
-        if (hard) {
-            e.blacklistedUntil = System.currentTimeMillis() + BLACKLIST_MS;
-        }
-        entries.put(u, e);
-        if (channelKey != null && u.equals(preferredByChannel.get(channelKey))) {
-            preferredByChannel.remove(channelKey);
+        synchronized (lock) {
+            Entry e = entries.get(u);
+            if (e == null) {
+                e = new Entry(u);
+            }
+            e.failCount++;
+            e.lastFailAt = System.currentTimeMillis();
+            if (hard) {
+                e.blacklistedUntil = System.currentTimeMillis() + BLACKLIST_MS;
+            }
+            entries.put(u, e);
+            if (channelKey != null && u.equals(preferredByChannel.get(channelKey))) {
+                preferredByChannel.remove(channelKey);
+            }
         }
         save();
     }
@@ -217,23 +228,34 @@ public class LineReputationStore {
         }
     }
 
+    /** 500ms 节流合并写盘，实际序列化在 saver 线程执行 */
     private void save() {
+        if (!savePending.compareAndSet(false, true)) {
+            return;
+        }
+        saver.schedule(this::doSave, 500, java.util.concurrent.TimeUnit.MILLISECONDS);
+    }
+
+    private void doSave() {
+        savePending.set(false);
         try {
-            pruneToCapacity();
             JSONArray arr = new JSONArray();
-            for (Entry e : entries.values()) {
-                JSONObject o = new JSONObject();
-                o.put("url", e.url);
-                o.put("successCount", e.successCount);
-                o.put("failCount", e.failCount);
-                o.put("lastSuccessAt", e.lastSuccessAt);
-                o.put("lastFailAt", e.lastFailAt);
-                o.put("blacklistedUntil", e.blacklistedUntil);
-                arr.put(o);
-            }
             JSONObject pref = new JSONObject();
-            for (Map.Entry<String, String> en : preferredByChannel.entrySet()) {
-                pref.put(en.getKey(), en.getValue());
+            synchronized (lock) {
+                pruneToCapacity();
+                for (Entry e : entries.values()) {
+                    JSONObject o = new JSONObject();
+                    o.put("url", e.url);
+                    o.put("successCount", e.successCount);
+                    o.put("failCount", e.failCount);
+                    o.put("lastSuccessAt", e.lastSuccessAt);
+                    o.put("lastFailAt", e.lastFailAt);
+                    o.put("blacklistedUntil", e.blacklistedUntil);
+                    arr.put(o);
+                }
+                for (Map.Entry<String, String> en : preferredByChannel.entrySet()) {
+                    pref.put(en.getKey(), en.getValue());
+                }
             }
             prefs.edit()
                     .putString(KEY_ENTRIES, arr.toString())

@@ -30,7 +30,7 @@
     {
       "id": "burningc4-github",
       "name": "BurningC4 中国源 (镜像)",
-      "url": "https://wfygefjgd.github.io/live-player/iptv-mirrors/burningc4-chinese-iptv.m3u",
+      "url": "https://wfygefjgd1-eng.github.io/live-player/iptv-mirrors/burningc4-chinese-iptv.m3u",
       "type": "m3u",
       "priority": 3,
       "region": "cn",
@@ -41,7 +41,7 @@
     {
       "id": "zbefine-2026",
       "name": "zbefine 2026 维护源 (镜像)",
-      "url": "https://wfygefjgd.github.io/live-player/iptv-mirrors/zbefine-iptv.m3u",
+      "url": "https://wfygefjgd1-eng.github.io/live-player/iptv-mirrors/zbefine-iptv.m3u",
       "type": "m3u",
       "priority": 4,
       "region": "cn",
@@ -52,7 +52,7 @@
     {
       "id": "suxuang-ysp",
       "name": "suxuang IPv6 源 (镜像)",
-      "url": "https://wfygefjgd.github.io/live-player/iptv-mirrors/suxuang-myiptv.m3u",
+      "url": "https://wfygefjgd1-eng.github.io/live-player/iptv-mirrors/suxuang-myiptv.m3u",
       "type": "m3u",
       "priority": 5,
       "region": "cn",

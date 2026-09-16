@@ -12,6 +12,7 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.fragment.app.Fragment;
 import androidx.recyclerview.widget.GridLayoutManager;
+import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 
@@ -20,6 +21,7 @@ import com.clean.player.model.ApiResponse;
 import com.clean.player.model.VideoItem;
 import com.clean.player.model.VideoListData;
 import com.clean.player.net.NetManager;
+import com.clean.player.util.Prefs;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -35,6 +37,7 @@ public class VideoListFragment extends Fragment {
     private static final int MODE_HOME = 0;
     private static final int MODE_SHORT = 1;
     private static final int MODE_SEARCH = 2;
+    private static final int PAGE_SIZE = 20;
 
     private SwipeRefreshLayout swipe;
     private RecyclerView recycler;
@@ -43,6 +46,9 @@ public class VideoListFragment extends Fragment {
     private int mode = MODE_HOME;
     private int page = 1;
     private String keyword = "";
+    private boolean loading = false;
+    private boolean reachedEnd = false;
+    private Call<ApiResponse<VideoListData>> currentCall;
 
     public static VideoListFragment home() {
         return create(MODE_HOME, "");
@@ -93,24 +99,43 @@ public class VideoListFragment extends Fragment {
         recycler.setAdapter(adapter);
         swipe.setOnRefreshListener(() -> {
             page = 1;
-            load();
+            reachedEnd = false;
+            load(false);
         });
-        load();
+        // 滚动到底部附近时加载下一页
+        recycler.addOnScrollListener(new RecyclerView.OnScrollListener() {
+            @Override
+            public void onScrolled(@NonNull RecyclerView rv, int dx, int dy) {
+                if (loading || reachedEnd || dy <= 0) return;
+                LinearLayoutManager lm = (LinearLayoutManager) rv.getLayoutManager();
+                if (lm == null) return;
+                int last = lm.findLastVisibleItemPosition();
+                int count = adapter.getItemCount();
+                if (count > 0 && last >= count - 4) {
+                    page++;
+                    load(true);
+                }
+            }
+        });
+        load(false);
     }
 
     public void setKeywordAndReload(String kw) {
         this.keyword = kw == null ? "" : kw;
         this.mode = MODE_SEARCH;
         this.page = 1;
-        load();
+        this.reachedEnd = false;
+        load(false);
     }
 
-    private void load() {
-        swipe.setRefreshing(true);
+    private void load(final boolean append) {
+        if (!isAdded()) return;
+        loading = true;
+        if (!append) swipe.setRefreshing(true);
         Map<String, Object> body = new HashMap<>();
         body.put("page", page);
-        body.put("page_size", 20);
-        body.put("pageSize", 20);
+        body.put("page_size", PAGE_SIZE);
+        body.put("pageSize", PAGE_SIZE);
         if (mode == MODE_SEARCH) {
             body.put("keyword", keyword);
             body.put("key", keyword);
@@ -125,23 +150,40 @@ public class VideoListFragment extends Fragment {
         } else {
             call = NetManager.api().homeRecommend(body);
         }
+        // 取消在途的旧请求，避免慢响应覆盖新结果
+        if (currentCall != null) {
+            currentCall.cancel();
+        }
+        currentCall = call;
 
         call.enqueue(new Callback<ApiResponse<VideoListData>>() {
             @Override
             public void onResponse(@NonNull Call<ApiResponse<VideoListData>> call,
                                    @NonNull Response<ApiResponse<VideoListData>> response) {
-                if (!isAdded()) return;
+                if (call.isCanceled() || !isAdded()) return;
+                loading = false;
                 swipe.setRefreshing(false);
                 List<VideoItem> items = new ArrayList<>();
                 if (response.isSuccessful() && response.body() != null) {
                     ApiResponse<VideoListData> body = response.body();
+                    if (!body.ok()) {
+                        handleBizError(body);
+                        return;
+                    }
                     if (body.data != null && body.data.items() != null) {
                         items.addAll(body.data.items());
                     }
                 }
-                adapter.setItems(items);
-                tvEmpty.setVisibility(items.isEmpty() ? View.VISIBLE : View.GONE);
-                if (items.isEmpty() && response.code() != 200) {
+                if (items.size() < PAGE_SIZE) {
+                    reachedEnd = true;
+                }
+                if (append) {
+                    adapter.appendItems(items);
+                } else {
+                    adapter.setItems(items);
+                }
+                tvEmpty.setVisibility(adapter.getItemCount() == 0 ? View.VISIBLE : View.GONE);
+                if (adapter.getItemCount() == 0 && response.code() != 200) {
                     Toast.makeText(requireContext(),
                             "接口返回 " + response.code() + "（可能需 AES 封装，见 README）",
                             Toast.LENGTH_LONG).show();
@@ -150,12 +192,29 @@ public class VideoListFragment extends Fragment {
 
             @Override
             public void onFailure(@NonNull Call<ApiResponse<VideoListData>> call, @NonNull Throwable t) {
+                if (call.isCanceled()) return;
                 if (!isAdded()) return;
+                loading = false;
                 swipe.setRefreshing(false);
-                tvEmpty.setVisibility(View.VISIBLE);
+                if (append) {
+                    // 追加失败回退一页，下次滚动可重试
+                    page = Math.max(1, page - 1);
+                }
+                tvEmpty.setVisibility(adapter.getItemCount() == 0 ? View.VISIBLE : View.GONE);
                 String msg = t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName();
                 Toast.makeText(requireContext(), "加载失败: " + msg, Toast.LENGTH_SHORT).show();
             }
         });
+    }
+
+    /** 业务错误（HTTP 200 但 code != 成功）：展示服务端提示；授权类错误清掉失效 token */
+    private void handleBizError(ApiResponse<VideoListData> body) {
+        String tip = body.tip();
+        Toast.makeText(requireContext(), tip, Toast.LENGTH_SHORT).show();
+        String m = (body.msg != null ? body.msg : "") + (body.message != null ? body.message : "");
+        if (body.code == 401 || body.code == 403 || m.contains("登录") || m.contains("token")
+                || m.contains("Token")) {
+            Prefs.put(Prefs.USER_TOKEN, "");
+        }
     }
 }

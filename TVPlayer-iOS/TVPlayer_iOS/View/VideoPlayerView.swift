@@ -399,7 +399,6 @@ final class NowPlayingController {
 }
 
 extension Notification.Name {
-    static let tvPlayerNeedsRelayout = Notification.Name("tvPlayerNeedsRelayout")
     static let tvPlayerInterruptionBegan = Notification.Name("tvPlayerInterruptionBegan")
     static let tvPlayerInterruptionEnded = Notification.Name("tvPlayerInterruptionEnded")
     static let tvPlayerVideoRendered = Notification.Name("tvPlayerVideoRendered")

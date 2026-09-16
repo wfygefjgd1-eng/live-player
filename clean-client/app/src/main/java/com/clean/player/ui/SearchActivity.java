@@ -29,6 +29,7 @@ import retrofit2.Response;
 
 public class SearchActivity extends AppCompatActivity {
     private VideoAdapter adapter;
+    private Call<ApiResponse<VideoListData>> currentCall;
 
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
@@ -58,6 +59,15 @@ public class SearchActivity extends AppCompatActivity {
         });
     }
 
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        if (currentCall != null) {
+            currentCall.cancel();
+            currentCall = null;
+        }
+    }
+
     private void search(String keyword) {
         Map<String, Object> body = new HashMap<>();
         body.put("page", 1);
@@ -65,15 +75,26 @@ public class SearchActivity extends AppCompatActivity {
         body.put("keyword", keyword);
         body.put("key", keyword);
         body.put("words", keyword);
-        NetManager.api().searchVideo(body).enqueue(new Callback<ApiResponse<VideoListData>>() {
+        // 取消上一次搜索的在途请求，避免慢响应覆盖新结果（结果串台）
+        if (currentCall != null) {
+            currentCall.cancel();
+        }
+        currentCall = NetManager.api().searchVideo(body);
+        currentCall.enqueue(new Callback<ApiResponse<VideoListData>>() {
             @Override
             public void onResponse(@NonNull Call<ApiResponse<VideoListData>> call,
                                    @NonNull Response<ApiResponse<VideoListData>> response) {
+                if (call.isCanceled() || isDestroyed() || isFinishing()) return;
                 List<VideoItem> items = new ArrayList<>();
-                if (response.isSuccessful() && response.body() != null
-                        && response.body().data != null
-                        && response.body().data.items() != null) {
-                    items.addAll(response.body().data.items());
+                if (response.isSuccessful() && response.body() != null) {
+                    ApiResponse<VideoListData> body = response.body();
+                    if (!body.ok()) {
+                        Toast.makeText(SearchActivity.this, body.tip(), Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    if (body.data != null && body.data.items() != null) {
+                        items.addAll(body.data.items());
+                    }
                 }
                 adapter.setItems(items);
                 if (items.isEmpty()) {
@@ -83,6 +104,8 @@ public class SearchActivity extends AppCompatActivity {
 
             @Override
             public void onFailure(@NonNull Call<ApiResponse<VideoListData>> call, @NonNull Throwable t) {
+                if (call.isCanceled()) return;
+                if (isDestroyed() || isFinishing()) return;
                 String msg = t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName();
                 Toast.makeText(SearchActivity.this, msg, Toast.LENGTH_SHORT).show();
             }

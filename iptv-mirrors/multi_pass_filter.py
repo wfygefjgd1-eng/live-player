@@ -36,9 +36,9 @@ REMOTE_SOURCES = [
     ("Guovin result", "https://raw.githubusercontent.com/Guovin/iptv-api/gd/output/result.m3u"),
     ("vbskycn iptv4", "https://raw.githubusercontent.com/vbskycn/iptv/master/tv/iptv4.m3u"),
     ("fanmingming ipv6", "https://raw.githubusercontent.com/fanmingming/live/main/tv/m3u/ipv6.m3u"),
-    ("BurningC4", "https://wfygefjgd.github.io/live-player/iptv-mirrors/burningc4-chinese-iptv.m3u"),
-    ("zbefine", "https://wfygefjgd.github.io/live-player/iptv-mirrors/zbefine-iptv.m3u"),
-    ("suxuang", "https://wfygefjgd.github.io/live-player/iptv-mirrors/suxuang-myiptv.m3u"),
+    ("BurningC4", "https://wfygefjgd1-eng.github.io/live-player/iptv-mirrors/burningc4-chinese-iptv.m3u"),
+    ("zbefine", "https://wfygefjgd1-eng.github.io/live-player/iptv-mirrors/zbefine-iptv.m3u"),
+    ("suxuang", "https://wfygefjgd1-eng.github.io/live-player/iptv-mirrors/suxuang-myiptv.m3u"),
 ]
 
 LOCAL_JSON = [

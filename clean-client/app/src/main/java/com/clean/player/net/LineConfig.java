@@ -50,7 +50,7 @@ public final class LineConfig {
         Prefs.put(Prefs.SP_BASE_URL, ensureSlash(url));
     }
 
-    private static String ensureSlash(String url) {
+    static String ensureSlash(String url) {
         if (url == null || url.isEmpty()) {
             return url;
         }

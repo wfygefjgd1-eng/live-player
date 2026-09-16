@@ -3,8 +3,12 @@ title = TVPlayer
 package.name = tvplayer
 package.domain = org.tvplayer
 source.dir = .
-source.include_exts = py,png,jpg,kv,atlas,json
+# Kivy 版只需要 main.py + android_main.py（源均来自网络，无内置 JSON 依赖）
+source.include_exts = py,png,jpg,kv,atlas
 source.include_patterns = android_main.py,main.py
+# 排除无关目录，避免把 iOS/Android 工程与数 MB 的频道 JSON 打进 APK
+source.exclude_dirs = .git,.github,TVPlayer-iOS,TVPlayer_iOS,__pycache__,android-native,build-artifacts,clean-client,iptv-mirrors,release,scripts
+source.exclude_patterns = tv_player.py,tv_player_desktop.py,tv_player_mpv.py,tv_player_pro.py,tv_player_tk.py,channel_manager.py,channel_rules_manager.py,verify_optimizations.py,PATCH_RULES_MANAGER.py,channel_rules.json,iptv-sources.json
 version = 1.0.0
 requirements = python3,kivy==2.2.1,ffpyplayer
 orientation = landscape
