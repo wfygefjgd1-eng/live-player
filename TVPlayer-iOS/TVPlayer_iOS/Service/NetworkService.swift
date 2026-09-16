@@ -106,31 +106,11 @@ final class NetworkService {
 
         var request = URLRequest(url: u, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout)
         request.setValue(ua, forHTTPHeaderField: "User-Agent")
-        // 流式读取并边读边限量：先全量下载再校验的话，超大/异常响应会先吃满内存
-        let (bytes, response) = try await session.bytes(for: request)
+        // 一次性读取（原生缓冲，最快）：资源超时 17s 兜底下载时长，
+        // 下载后按 maxBodyBytes 拒绝异常大响应，避免内存占用过高
+        let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse,
               (200...299).contains(http.statusCode) else {
-            throw NetworkFetchError.badResponse
-        }
-        // expectedContentLength 未知时为 -1，不会误判为超大
-        if http.expectedContentLength > Self.maxBodyBytes {
-            throw NetworkFetchError.parseEmpty
-        }
-        var data = Data()
-        data.reserveCapacity(256 * 1024)
-        var byteStream = bytes
-        do {
-            // 分块读取：逐字节迭代 AsyncBytes 每字节都要穿越一次异步管线，
-            // MB 级源慢一个数量级，且被镜像竞速成倍放大
-            while let chunk = try await byteStream.readData(upToCount: Self.readChunkSize) {
-                data.append(chunk)
-                if data.count > Self.maxBodyBytes {
-                    throw NetworkFetchError.parseEmpty
-                }
-            }
-        } catch let e as NetworkFetchError {
-            throw e
-        } catch {
             throw NetworkFetchError.badResponse
         }
         // 超大源（几十 MB）拒绝解析，避免内存占用过高；正常 M3U 都在 KB 级
@@ -156,8 +136,6 @@ final class NetworkService {
 
     /// M3U 源最大字节数：5MB 足够容纳最大公开源（几十万行），再大视为异常拒绝
     private static let maxBodyBytes = 5 * 1024 * 1024
-    /// 分块读取粒度：64KB 在内存与迭代开销间平衡
-    private static let readChunkSize = 64 * 1024
 
     /// 单一源 + 镜像竞速：GitHub 系地址自动展开镜像并发请求，任一候选返回可用文本即胜出。
     /// 被墙域名常见表现是挂到超时而非快速失败，串行回退会拖慢启动，故并发。
