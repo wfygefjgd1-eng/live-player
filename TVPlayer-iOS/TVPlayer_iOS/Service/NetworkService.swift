@@ -106,8 +106,8 @@ final class NetworkService {
             throw NetworkFetchError.noNetwork
         }
 
-        var request = URLRequest(url: u, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout)
-        request.setValue(ua, forHTTPHeaderField: "User-Agent")
+        var request = URLRequest(url: u, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: Self.timeout)
+        request.setValue(Self.ua, forHTTPHeaderField: "User-Agent")
         // 一次性读取（原生缓冲，最快）：资源超时 17s 兜底下载时长，
         // 下载后按 maxBodyBytes 拒绝异常大响应，避免内存占用过高
         let (data, response) = try await session.data(for: request)
