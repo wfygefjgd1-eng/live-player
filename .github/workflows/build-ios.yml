@@ -87,8 +87,11 @@ jobs:
 
       - name: Get version
         id: get_version
+        env:
+          # github.ref 经 env 传入再比较：直接内插进 bash 会被 tag 名注入命令
+          GIT_REF: ${{ github.ref }}
         run: |
-          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+          if [[ "$GIT_REF" == refs/tags/* ]]; then
             VERSION=${GITHUB_REF#refs/tags/v}
             VERSION=${VERSION%-ios}
             echo "version=$VERSION" >> $GITHUB_OUTPUT
@@ -115,6 +118,8 @@ jobs:
       - name: Check release notes
         if: startsWith(github.ref, 'refs/tags/')
         id: notes
+        # job 级默认 working-directory 是 TVPlayer-iOS，release notes 在仓库根目录
+        working-directory: .
         run: |
           NOTES="RELEASE_NOTES_iOS_v${{ steps.get_version.outputs.version }}.md"
           if [ -f "$NOTES" ]; then

@@ -14,6 +14,13 @@ enum VolumeHelper {
     }
 
     private static func ensureInstalled() {
+        // 已安装但不在当前 keyWindow 上：keyWindow 未就绪时安装过、或 window/scene
+        // 被重建后，旧视图树已脱离层次，音量手势会静默失效 → 重新挂载
+        if let view = volumeView, view.window == nil || view.window !== keyWindow(),
+           let window = keyWindow() {
+            view.removeFromSuperview()
+            window.insertSubview(view, at: 0)
+        }
         guard volumeView == nil else {
             // 已安装但 slider 可能尚未就绪（极少情况）
             if volumeSlider == nil {

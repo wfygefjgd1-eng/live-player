@@ -82,12 +82,10 @@ final class LineSpeedTester {
             switch err.code {
             case .timedOut, .cannotFindHost, .cannotConnectToHost, .networkConnectionLost,
                  .dnsLookupFailed, .notConnectedToInternet:
-                // 超时/连不上：多数是慢或临时网络，不当 hardFail（否则可播率崩）
-                // 仅「明确无法解析的非法 host」才 hard——这里统一 unknown，让 AVPlayer 再试
-                if err.code == .cannotFindHost || err.code == .dnsLookupFailed {
-                    hardFailCache[url] = Date()
-                    return .hardFail
-                }
+                // 超时/连不上/DNS 失败：多数是慢或临时网络，不当 hardFail（否则可播率崩）。
+                // DNS 失败（cannotFindHost/dnsLookupFailed）也不能缓存 hardFail：
+                // 本地网络权限弹窗未确认 / captive portal 期间正常域名同样解析失败，
+                // 缓存会把好线连坐误杀 2 分钟。统一 unknown，让播放器再试。
                 return .unknown
             default:
                 return .unknown

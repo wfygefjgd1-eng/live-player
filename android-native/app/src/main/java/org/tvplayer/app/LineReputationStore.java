@@ -45,41 +45,44 @@ public class LineReputationStore {
     }
 
     public boolean isBlacklisted(String url) {
-        Entry e = entries.get(norm(url));
-        if (e == null || e.blacklistedUntil <= 0) {
-            return false;
+        synchronized (lock) {
+            Entry e = entries.get(norm(url));
+            if (e == null || e.blacklistedUntil <= 0) {
+                return false;
+            }
+            return e.blacklistedUntil > System.currentTimeMillis();
         }
-        return e.blacklistedUntil > System.currentTimeMillis();
     }
 
     public String preferredURL(String channelKey) {
         if (channelKey == null) {
             return null;
         }
-        return preferredByChannel.get(channelKey);
+        synchronized (lock) {
+            return preferredByChannel.get(channelKey);
+        }
     }
 
     public int score(String url) {
-        String u = norm(url);
-        if (isBlacklisted(u)) {
-            return Integer.MAX_VALUE - 1;
+        synchronized (lock) {
+            String u = norm(url);
+            Entry e = entries.get(u);
+            if (e != null && e.blacklistedUntil > System.currentTimeMillis()) {
+                return Integer.MAX_VALUE - 1;
+            }
+            if (e == null || (e.successCount == 0 && e.failCount == 0)) {
+                return 500_000;
+            }
+            int base = e.failCount * 10_000 - e.successCount * SUCCESS_WEIGHT * 1_000;
+            long now = System.currentTimeMillis();
+            if (e.lastSuccessAt > 0 && now - e.lastSuccessAt < 7L * 86400_000L) {
+                base -= 2_000;
+            }
+            if (e.lastFailAt > 0 && now - e.lastFailAt < 86400_000L) {
+                base += 5_000;
+            }
+            return Math.max(0, base);
         }
-        Entry e = entries.get(u);
-        if (e == null) {
-            return 500_000;
-        }
-        if (e.successCount == 0 && e.failCount == 0) {
-            return 500_000;
-        }
-        int base = e.failCount * 10_000 - e.successCount * SUCCESS_WEIGHT * 1_000;
-        long now = System.currentTimeMillis();
-        if (e.lastSuccessAt > 0 && now - e.lastSuccessAt < 7L * 86400_000L) {
-            base -= 2_000;
-        }
-        if (e.lastFailAt > 0 && now - e.lastFailAt < 86400_000L) {
-            base += 5_000;
-        }
-        return Math.max(0, base);
     }
 
     public void markSuccess(String url, String channelKey) {
@@ -233,35 +236,53 @@ public class LineReputationStore {
         if (!savePending.compareAndSet(false, true)) {
             return;
         }
-        saver.schedule(this::doSave, 500, java.util.concurrent.TimeUnit.MILLISECONDS);
+        try {
+            saver.schedule(this::doSave, 500, java.util.concurrent.TimeUnit.MILLISECONDS);
+        } catch (Exception rejected) {
+            // shutdown 后拒绝新任务（极端时序下销毁后仍有一次 mark）：直接同步落盘
+            savePending.set(false);
+            doSave();
+        }
     }
 
     private void doSave() {
         savePending.set(false);
         try {
-            JSONArray arr = new JSONArray();
-            JSONObject pref = new JSONObject();
+            List<Entry> snapshot;
+            Map<String, String> prefSnapshot;
             synchronized (lock) {
                 pruneToCapacity();
-                for (Entry e : entries.values()) {
-                    JSONObject o = new JSONObject();
-                    o.put("url", e.url);
-                    o.put("successCount", e.successCount);
-                    o.put("failCount", e.failCount);
-                    o.put("lastSuccessAt", e.lastSuccessAt);
-                    o.put("lastFailAt", e.lastFailAt);
-                    o.put("blacklistedUntil", e.blacklistedUntil);
-                    arr.put(o);
-                }
-                for (Map.Entry<String, String> en : preferredByChannel.entrySet()) {
-                    pref.put(en.getKey(), en.getValue());
-                }
+                snapshot = new ArrayList<>(entries.values());
+                prefSnapshot = new HashMap<>(preferredByChannel);
+            }
+            JSONArray arr = new JSONArray();
+            for (Entry e : snapshot) {
+                JSONObject o = new JSONObject();
+                o.put("url", e.url);
+                o.put("successCount", e.successCount);
+                o.put("failCount", e.failCount);
+                o.put("lastSuccessAt", e.lastSuccessAt);
+                o.put("lastFailAt", e.lastFailAt);
+                o.put("blacklistedUntil", e.blacklistedUntil);
+                arr.put(o);
+            }
+            JSONObject pref = new JSONObject();
+            for (Map.Entry<String, String> en : prefSnapshot.entrySet()) {
+                pref.put(en.getKey(), en.getValue());
             }
             prefs.edit()
                     .putString(KEY_ENTRIES, arr.toString())
                     .putString(KEY_PREFERRED, pref.toString())
                     .apply();
         } catch (Exception ignored) {
+        }
+    }
+
+    /** Activity 销毁时调用：停掉 saver 线程并把未落盘的修改冲刷出去 */
+    public void shutdown() {
+        saver.shutdown();
+        if (savePending.compareAndSet(true, false)) {
+            doSave();
         }
     }
 

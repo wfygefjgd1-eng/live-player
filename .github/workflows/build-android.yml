@@ -43,8 +43,11 @@ jobs:
       - name: Get version
         id: ver
         working-directory: .
+        env:
+          # github.ref 经 env 传入再比较：直接内插进 bash 会被 tag 名注入命令
+          GIT_REF: ${{ github.ref }}
         run: |
-          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+          if [[ "$GIT_REF" == refs/tags/* ]]; then
             VERSION=${GITHUB_REF#refs/tags/v}
             VERSION=${VERSION%-android}
             echo "version=$VERSION" >> $GITHUB_OUTPUT
@@ -78,13 +81,20 @@ jobs:
             echo "ERROR: no release APK found"; exit 1
           fi
           BT=$(ls -d "${ANDROID_HOME}/build-tools/"*/ | sort -V | tail -1)
-          if "$BT/apksigner" verify --print-certs "$APK" | grep -qi "Android Debug"; then
+          # 先独立校验 apksigner 退出码：管道接 grep 会吞掉 apksigner 的失败
+          #（未签名/损坏 APK 时 stdout 为空、grep 无匹配，旧写法会误判为 release-signed）
+          if ! "$BT/apksigner" verify --print-certs "$APK" > /tmp/certs.txt 2>&1; then
+            echo "ERROR: apksigner verify failed — APK is unsigned or corrupt, refusing to publish"
+            cat /tmp/certs.txt
+            exit 1
+          fi
+          if grep -qi "Android Debug" /tmp/certs.txt; then
             echo "ERROR: APK is debug-signed — refusing to publish"
-            "$BT/apksigner" verify --print-certs "$APK"
+            cat /tmp/certs.txt
             exit 1
           fi
           echo "OK: APK is release-signed"
-          "$BT/apksigner" verify --print-certs "$APK" | head -3
+          head -3 /tmp/certs.txt
 
       - name: Clean up keystore
         if: always()

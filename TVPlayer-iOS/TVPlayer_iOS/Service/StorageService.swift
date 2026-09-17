@@ -73,6 +73,11 @@ final class StorageService {
     // 改为 Caches 目录文件 + 原子写入 + 解码结果内存缓存；老版本的 UserDefaults 缓存首次读取时自动迁移。
 
     private var channelsMemo: [Channel]?
+    /// 频道缓存 JSON 专用编码队列：编码可达数 MB，绝不能在 queue 的 barrier 块内做——
+    /// barrier 独占期间主线程所有 queue.sync 读（isLineHidden/isLineBlacklisted 等
+    /// 播放热路径）都会被卡住，频道刷新时产生可感知 UI 卡顿。串行队列保证
+    /// 编码 FIFO → barrier 写 FIFO，两次 saveChannels 不会乱序。
+    private let encodeQueue = DispatchQueue(label: "StorageService.encode", qos: .utility)
     /// 频道缓存放 Application Support（系统不会清除；Caches 目录会被系统随时清空），
     /// 并排除 iCloud 备份。目录检查/属性写入只做一次，避免每次访问都做文件系统调用。
     /// 所有访问都在 queue 的 barrier 块内，惰性初始化无并发竞争。
@@ -91,27 +96,29 @@ final class StorageService {
     }()
 
     func saveChannels(_ channels: [Channel]) {
-        queue.async(flags: .barrier) { [weak self] in
-            guard let self else { return }
-            self.channelsMemo = channels
-            guard let data = try? JSONEncoder().encode(channels) else { return }
-            do {
-                try data.write(to: self.channelsCacheURL, options: .atomic)
-                // 文件写成功后清掉老版本塞在 UserDefaults 里的整表数据
-                self.defaults.removeObject(forKey: self.kChannels)
-            } catch {
-                // 文件写失败时退回 UserDefaults，保证缓存不丢
-                self.defaults.set(data, forKey: self.kChannels)
+        encodeQueue.async { [weak self] in
+            guard let self, let data = try? JSONEncoder().encode(channels) else { return }
+            let metaData = try? JSONEncoder().encode(
+                ChannelsMeta(version: self.currentDataVersion,
+                             count: channels.count,
+                             updatedAt: Date()))
+            // 只有内存赋值与文件写需要 barrier 独占（此时 JSON 已在后台编码完成）
+            self.queue.async(flags: .barrier) { [weak self] in
+                guard let self else { return }
+                self.channelsMemo = channels
+                do {
+                    try data.write(to: self.channelsCacheURL, options: .atomic)
+                    // 文件写成功后清掉老版本塞在 UserDefaults 里的整表数据
+                    self.defaults.removeObject(forKey: self.kChannels)
+                } catch {
+                    // 文件写失败时退回 UserDefaults，保证缓存不丢
+                    self.defaults.set(data, forKey: self.kChannels)
+                }
+                if let metaData {
+                    self.defaults.set(metaData, forKey: self.kChannelsMeta)
+                }
+                self.defaults.set(self.currentDataVersion, forKey: self.kDataVersion)
             }
-
-            // 保存元数据
-            let meta = ChannelsMeta(version: self.currentDataVersion,
-                                    count: channels.count,
-                                    updatedAt: Date())
-            if let metaData = try? JSONEncoder().encode(meta) {
-                self.defaults.set(metaData, forKey: self.kChannelsMeta)
-            }
-            self.defaults.set(self.currentDataVersion, forKey: self.kDataVersion)
         }
     }
 

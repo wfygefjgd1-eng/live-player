@@ -24,19 +24,14 @@ final class NetworkMonitor {
         case unknown
     }
 
-    /// 网络从无到有时回调
-    var onSatisfied: (() -> Void)? {
-        didSet {
-            if isSatisfied {
-                DispatchQueue.main.async { [weak self] in
-                    self?.onSatisfied?()
-                }
-            }
-        }
-    }
+    /// 网络从无到有时回调（仅真实「无 → 有」边沿；首次路径更新只建立基线）
+    var onSatisfied: (() -> Void)?
 
     /// 网络类型变化时回调
     var onConnectionTypeChanged: ((ConnectionType) -> Void)?
+
+    /// 是否已收到首次路径更新：之前「无网络」只是初始值，不算恢复边沿
+    private var didReceiveFirstPath = false
 
     private init() {
         monitor.pathUpdateHandler = { [weak self] path in
@@ -71,10 +66,12 @@ final class NetworkMonitor {
             // 推断网络类型
             self.connectionType = type
 
-            // 网络恢复通知（无 → 有）
-            if satisfied && !wasSatisfied {
+            // 网络恢复通知（无 → 有）。首次路径更新只建立基线不触发：
+            // 否则 App 每次启动都会多发一次假「网络恢复」，多拉一轮全量源
+            if self.didReceiveFirstPath, satisfied && !wasSatisfied {
                 self.onSatisfied?()
             }
+            self.didReceiveFirstPath = true
 
             // 网络类型变化通知（含首次判定到 wifi/蜂窝，便于授权后重载画面）
             if self.connectionType != previousType {

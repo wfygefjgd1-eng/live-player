@@ -446,8 +446,13 @@ final class PlayerEngine: ObservableObject {
         mpvStartupTask = nil
         avStartupTask?.cancel()
         avStartupTask = nil
+        // 失败已终局：30s 无声无画看门狗随之取消（isSwitching 已复位，语义上不再报「无声无画」）
+        cancelSilentStallWatchdog()
         diagnostics.reason = reason
         recordFailureOnce()
+        // 失败后播放并未发生（或已中断）：不复位会让「暂停一个从未播出的流」、
+        // 锁屏 NowPlaying 残留「播放中」、与 isReady=false 自相矛盾
+        isPlaying = false
         isSwitching = false
         if isReady {
             onError?()
@@ -617,10 +622,10 @@ final class PlayerEngine: ObservableObject {
     func setLineTimeoutEnabled(_ enabled: Bool) {
         lineTimeoutEnabled = enabled
         if !enabled {
-            mpvStartupTask?.cancel()
-            mpvStartupTask = nil
-            avStartupTask?.cancel()
-            avStartupTask = nil
+            // 注意：起播超时任务（mpvStartupTask/avStartupTask）绝不能取消——
+            // 超时与「自动换线」开关解耦（见 startAVPlayer/startMPV 注释），
+            // finishFailure 只复位状态、是否换线由 VM 侧守卫。取消超时任务会让
+            // 关掉开关的用户在死流下永久停在「正在加载」转圈
             stopStallCheck()
             cancelAllTasks()
         } else if !isReady, currentURL != nil {
@@ -655,6 +660,8 @@ final class PlayerEngine: ObservableObject {
         mpvEngine.stop()
         teardownAVObservers()
         avPlayer.replaceCurrentItem(with: nil)
+        // 释放旧 AVPlayerItem 及其 asset/解码缓冲，否则一直被引擎强持有到下次 play()
+        avItem = nil
         cancelAllTasks()
         stopStallCheck()
         diagnosticsTask?.cancel()
@@ -696,6 +703,7 @@ final class PlayerEngine: ObservableObject {
         // 停止 AVPlayer：暂停并清空 item，释放渲染/解码
         avPlayer.pause()
         avPlayer.replaceCurrentItem(with: nil)
+        avItem = nil
         teardownAVObservers()
         // 清理诊断采样循环
         diagnosticsTask?.cancel()

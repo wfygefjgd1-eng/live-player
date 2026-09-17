@@ -357,10 +357,17 @@ final class MPVPlaybackEngine {
         case MPV_EVENT_SHUTDOWN:
             // mpv core 致命退出。只置 nil 会泄漏句柄与内部线程，且旧 ctx 的唤醒
             // 回调仍携带指向本引擎的指针继续 fire；必须摘回调 + 销毁句柄。
+            // 同时推进代次并取消采样链：否则 asyncAfter 采样块会按旧代次一直空转续期。
+            bumpGeneration()
+            samplerCancelled = true
             if let ctx = mpv {
                 mpv = nil
                 mpv_set_wakeup_callback(ctx, nil, nil)
-                DispatchQueue.global(qos: .utility).async {
+                // 销毁必须排在 samplerQueue（串行）：在途采样块可能已通过
+                // guard let ctx = mpv 检查、正在 mpv_get_property 中，若在
+                // global 队列并发 terminate_destroy 就是 use-after-free。
+                // 串行队列保证销毁在任何在途采样完成之后执行。
+                samplerQueue.async {
                     mpv_terminate_destroy(ctx)
                 }
             }

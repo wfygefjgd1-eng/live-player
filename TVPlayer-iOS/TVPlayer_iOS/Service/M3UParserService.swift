@@ -60,7 +60,11 @@ class M3UParserService {
                     continue
                 }
                 let display = normalizeDisplayName(name)
-                let key = normalizeName(display)
+                var key = normalizeName(display)
+                // 全部命中尾部噪音词的频道（如「高清直播」「测试频道」）会剥成空 key，
+                // 多个不同频道会合并进同一个 "" 条目（列表少台、行数徽标失真）；
+                // 回退用显示名作 key（normalizeDisplayName 保证非空）
+                if key.isEmpty { key = display.lowercased() }
                 // 央视统一进「央视」分组，避免 CCTV-15/17 落在未分组
                 let group = isCCTVKey(key) ? "央视" : pendingGroup
                 if var existing = channels[key] {
@@ -78,22 +82,18 @@ class M3UParserService {
         return Array(channels.values)
     }
 
-    /// URL 合法性校验：放行 http/https/rtmp/rtsp 等播放管线支持的协议。
-    /// 与 PlayerViewModel.playLineLoop / autoSwitchLine 的协议白名单保持一致，
-    /// 否则 rtmp/rtsp 单线源会在解析阶段被整行丢弃、频道永远进不了列表。
-    /// 过滤目标是脏数据（HTML 误解析、js 脚本行、纯文本）而非特定协议。
+    /// URL 合法性校验：只放行 http/https（播放管线 playLineLoop / autoSwitchLine
+    /// 的白名单与此保持一致）。rtmp/rtsp/udp 等协议播放内核并不支持，解析阶段保留
+    /// 只会让单 rtmp 线频道进列表后必然「协议不支持」被自动跳台，白耗一轮切换周期。
+    /// 过滤目标是脏数据（HTML 误解析、js 脚本行、纯文本）与不支持的协议。
     private static func isValidMediaURL(_ raw: String) -> Bool {
         guard let url = URL(string: raw),
               let scheme = url.scheme?.lowercased() else {
             return false
         }
         switch scheme {
-        case "http", "https", "rtmp", "rtsp", "udp", "rtp", "rtmps":
-            // http/https 需有可解析主机名；其余协议交由播放器尝试，仅过滤明显垃圾
-            if scheme == "http" || scheme == "https" {
-                return url.host != nil
-            }
-            return true
+        case "http", "https":
+            return url.host != nil
         default:
             return false
         }

@@ -138,6 +138,8 @@ public class MainActivity extends AppCompatActivity {
     private volatile String activeSourceUrl = "";
     private boolean autoSwitchingSource = false;
     private boolean currentPlaybackReachedReady = false;
+    /** 用户显式换线（switchSource）：本次 playCurrent 跳过「偏好线/首条未拉黑线」覆盖 */
+    private boolean explicitLineSelection = false;
     private final Set<Integer> triedLineIndices = new HashSet<>();
     private int autoRecoverChannelHops = 0;
     private long readyAtMs = 0L;
@@ -297,7 +299,13 @@ public class MainActivity extends AppCompatActivity {
 
             @Override
             public void onPlayerError(com.google.android.exoplayer2.PlaybackException error) {
+                // 捕获当前代次：延迟执行前若已换线（playbackToken 递增），错误属于旧线路，
+                // 不得把从未尝试过的新线路误标失败
+                final int token = playbackToken;
                 mainHandler.post(() -> {
+                    if (token != playbackToken) {
+                        return;
+                    }
                     waitingForReady = false;
                     autoSwitchingSource = false;
                     cancelStallCheck();
@@ -694,7 +702,7 @@ public class MainActivity extends AppCompatActivity {
                                 || cached == null || cached.isEmpty()) {
                             return;
                         }
-                        channels.addAll(cached);
+                        channels.addAll(applyChannelLineRules(cached));
                         reputation.applyToChannels(channels);
                         adapter.setData(channels);
                         restoreLastChannelPosition();
@@ -708,64 +716,6 @@ public class MainActivity extends AppCompatActivity {
         }
 
         loadChannelsFromMultiSources();
-    }
-
-    /** fast 模式：候选源并发竞速，任一源解析出频道即胜出（原串行逐个 16s 超时太慢） */
-    private List<Channel> fetchChannels(List<String> candidates) {
-        if (candidates == null || candidates.isEmpty()) {
-            return new ArrayList<>();
-        }
-        final java.util.concurrent.atomic.AtomicReference<List<Channel>> winner =
-                new java.util.concurrent.atomic.AtomicReference<>();
-        final java.util.concurrent.CountDownLatch done =
-                new java.util.concurrent.CountDownLatch(1);
-        final java.util.concurrent.atomic.AtomicInteger remaining =
-                new java.util.concurrent.atomic.AtomicInteger(candidates.size());
-        for (String logical : candidates) {
-            mirrorPool.execute(() -> {
-                try {
-                    String body = httpGetWithMirrors(logical);
-                    if (body != null && !body.isEmpty()) {
-                        List<Channel> parsed = M3UParser.parse(body);
-                        if (!parsed.isEmpty() && winner.compareAndSet(null, parsed)) {
-                            done.countDown();
-                        }
-                    }
-                } catch (Exception ignored) {
-                } finally {
-                    if (remaining.decrementAndGet() == 0) {
-                        done.countDown();
-                    }
-                }
-            });
-        }
-        try {
-            done.await(45, java.util.concurrent.TimeUnit.SECONDS);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-        List<Channel> result = winner.get();
-        return result != null ? result : new ArrayList<>();
-    }
-
-    /** 逻辑源列表（未展开镜像）；实际拉取走 httpGetWithMirrors */
-    private List<String> buildSourceCandidates() {
-        LinkedHashSet<String> urls = new LinkedHashSet<>();
-        if (activeSourceUrl != null && !activeSourceUrl.isEmpty()) {
-            urls.add(activeSourceUrl.trim());
-        }
-        if (sourceUrls != null) {
-            for (String u : sourceUrls) {
-                if (u != null && !u.trim().isEmpty()) urls.add(u.trim());
-            }
-        }
-        for (String sourceUrl : MULTI_SOURCE_URLS) {
-            urls.add(sourceUrl);
-        }
-        if (urls.isEmpty()) {
-            urls.add(DEFAULT_SOURCE_URL);
-        }
-        return new ArrayList<>(urls);
     }
 
     private void showSourceInputDialog() {
@@ -1285,6 +1235,8 @@ public class MainActivity extends AppCompatActivity {
 
     private void resetTriedLines() {
         triedLineIndices.clear();
+        // 换台后回到自动模式（switchSource 会在调用后重新置位显式标记）
+        explicitLineSelection = false;
     }
 
     private void cancelPreferLineTask() {
@@ -1359,8 +1311,12 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
-        // 本台首次尝试：偏好 URL 或首条未拉黑线
-        if (triedLineIndices.isEmpty()) {
+        // 本台首次尝试：偏好 URL 或首条未拉黑线。
+        // 用户显式换线（switchSource）时不覆盖：否则只要存在偏好线，
+        // 换线手势/遥控左右键播回来的永远是原线路
+        final boolean explicitPick = explicitLineSelection;
+        explicitLineSelection = false;
+        if (triedLineIndices.isEmpty() && !explicitPick) {
             String pref = reputation.preferredURL(channel.key);
             if (pref != null) {
                 int pi = channel.getUrls().indexOf(pref);
@@ -1444,8 +1400,12 @@ public class MainActivity extends AppCompatActivity {
     private MediaItem buildMediaItem(String url) {
         Uri uri = Uri.parse(url);
         String path = uri.getPath() == null ? "" : uri.getPath().toLowerCase();
+        String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase();
         String mimeType;
-        if (path.endsWith(".m3u8") || path.endsWith(".m3u")) {
+        if (scheme.startsWith("rtsp")) {
+            // rtsp 源按 HLS 解析必然起播失败并被误拉黑 24h；ExoPlayer 2.19 核心内置 RTSP 支持
+            mimeType = MimeTypes.APPLICATION_RTSP;
+        } else if (path.endsWith(".m3u8") || path.endsWith(".m3u")) {
             mimeType = MimeTypes.APPLICATION_M3U8;
         } else if (path.endsWith(".mpd")) {
             mimeType = MimeTypes.APPLICATION_MPD;
@@ -1504,6 +1464,8 @@ public class MainActivity extends AppCompatActivity {
         int count = channel.getSourceCount();
         currentSourceIndex = (currentSourceIndex + direction + count) % count;
         resetTriedLines();
+        // 标记显式换线：playCurrent 不再用偏好线/首条未拉黑线覆盖用户的选择
+        explicitLineSelection = true;
         autoRecoverChannelHops = 0;
         playCurrent(showOsd, CHANNEL_SWITCH_TIMEOUT_MS);
     }
@@ -1775,8 +1737,10 @@ public class MainActivity extends AppCompatActivity {
         if (keyCode == KeyEvent.KEYCODE_SPACE) {
             if (player != null) {
                 if (player.isPlaying()) {
+                    userPaused = true;
                     player.pause();
                 } else {
+                    userPaused = false;
                     player.play();
                 }
                 return true;
@@ -1791,6 +1755,11 @@ public class MainActivity extends AppCompatActivity {
         // 尊重用户主动暂停：Home/锁屏往返不应把用户暂停的播放强行续上
         if (player != null && !userPaused) {
             player.setPlayWhenReady(true);
+            // 后台期间列表加载完成但被拦住未起播的：回前台补起播
+            if (player.getCurrentMediaItem() == null && !channels.isEmpty()
+                    && currentIndex >= 0 && currentIndex < channels.size()) {
+                playCurrent(false, CHANNEL_SWITCH_TIMEOUT_MS);
+            }
         }
     }
 
@@ -1831,6 +1800,10 @@ public class MainActivity extends AppCompatActivity {
             playerView.setPlayer(null);
             player.release();
             player = null;
+        }
+        if (reputation != null) {
+            // 停掉 saver 线程并冲刷未落盘的信誉数据（否则每次重建泄漏一个常驻线程）
+            reputation.shutdown();
         }
         netPool.shutdownNow();
         mirrorPool.shutdownNow();
@@ -2035,13 +2008,26 @@ public class MainActivity extends AppCompatActivity {
         if ("fast".equals(mode)) {
             showIndicator("快速模式：加载可用源...");
             status.setText("加载中...");
-            // 主线程构建候选源快照，再交给后台并发竞速
-            final List<String> fastCandidates = buildSourceCandidates();
+            // 主线程捕获快照，避免后台线程读取并发修改中的列表
+            final String fastActiveUrl = activeSourceUrl;
+            final List<String> fastUserSources = new ArrayList<>(sourceUrls);
             netPool.execute(() -> {
-                List<Channel> raced = fetchChannels(fastCandidates);
+                // 快速 = 顺序取首个可用源（与 UI 文案/fusionSourceLimit 一致）；
+                // 单源内部仍做镜像竞速。原全源并发竞速会瞬时拉满内存且胜者任意
+                List<String> order = buildFusionFetchUrls(
+                        fastActiveUrl, fastUserSources, mode, MULTI_SOURCE_URLS.length);
+                List<Channel> parsed = new ArrayList<>();
+                for (String u : order) {
+                    if (gen != loadGeneration) return;
+                    parsed = fetchOneSource(u);
+                    if (!parsed.isEmpty()) {
+                        break;
+                    }
+                }
+                final List<Channel> result = parsed;
                 mainHandler.post(() -> {
                     if (gen != loadGeneration) return;
-                    applyLoadedChannels(raced, raced.isEmpty() ? 0 : 1, 1, false);
+                    applyLoadedChannels(result, result.isEmpty() ? 0 : 1, 1, false);
                 });
             });
             return;
@@ -2110,11 +2096,18 @@ public class MainActivity extends AppCompatActivity {
 
                 if ("smart".equals(mode) && !firstBatchPosted && !allChannels.isEmpty()) {
                     firstBatchPosted = true;
-                    final List<Channel> firstBatch = mergeChannelsByName(new ArrayList<>(allChannels));
+                    // 深拷贝隔离：post 之后后台还会继续 mergeIntoByKey/addUrl 原地变异
+                    // byKey 里的同一批实例，主线程边遍历会构成数据竞争（CME 崩溃）
+                    List<Channel> merged = mergeChannelsByName(new ArrayList<>(allChannels));
+                    List<Channel> firstBatch = new ArrayList<>(merged.size());
+                    for (Channel c : merged) {
+                        firstBatch.add(new Channel(c.name, c.group, c.key, new ArrayList<>(c.getUrls())));
+                    }
+                    final List<Channel> postedBatch = firstBatch;
                     final int sc = successCount;
                     mainHandler.post(() -> {
                         if (gen != loadGeneration) return;
-                        applyLoadedChannels(firstBatch, sc, totalSources, true);
+                        applyLoadedChannels(postedBatch, sc, totalSources, true);
                     });
                 }
             }
@@ -2210,7 +2203,15 @@ public class MainActivity extends AppCompatActivity {
             currentIndex = 0;
             currentSourceIndex = 0;
         }
-        if (!wasPlaying) {
+        // 列表已替换：同步选中高亮（keepPlayback 路径不重播，之前高亮停在旧索引）
+        if (!channels.isEmpty() && adapter != null) {
+            adapter.setSelected(currentIndex);
+            channelList.scrollToPosition(currentIndex);
+        }
+        // 退到后台时不自动起播（画面未出、音频会在后台播放）；回前台由 onStart 补起播
+        boolean foreground = getLifecycle().getCurrentState()
+                .isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED);
+        if (!wasPlaying && foreground) {
             playCurrent(false, CHANNEL_SWITCH_TIMEOUT_MS);
         }
         if (!softMerge) {
@@ -2237,9 +2238,15 @@ public class MainActivity extends AppCompatActivity {
             return false;
         }
 
-        // 排除非标准端口
-        if (lower.matches(".*:\\d{5,}.*")) {
-            return false;
+        // 排除非法端口（仅检查 authority 的端口段；原 5 位数字全文正则会误杀
+        // 端口 ≥10000 的合法 IPTV 线路和路径中的长数字段）
+        try {
+            java.net.URI u = java.net.URI.create(url);
+            int port = u.getPort();
+            if (port > 65535) {
+                return false;
+            }
+        } catch (Exception ignored) {
         }
 
         return true;

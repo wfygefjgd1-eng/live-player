@@ -581,8 +581,12 @@ final class PlayerViewModel: ObservableObject {
 
         if silent {
             // 启动后台刷新：未出画时直接开播；已出画时若当前频道的原线路在最新数据里已不存在，
-            // 则用最新线路重新起播，避免一直沿用缓存里的旧线路
-            if !player.isReady && !playbackStable {
+            // 则用最新线路重新起播，避免一直沿用缓存里的旧线路。
+            // 用户主动暂停时不强制重播：否则回前台触发的静默刷新会覆盖暂停意图
+            //（playCurrent 复位 playbackPaused/engine.userPaused，声音突然响起、恢复按钮消失）
+            if userPaused {
+                // 仅同步索引，不改播放状态
+            } else if !player.isReady && !playbackStable {
                 playCurrent(showOSD: false, resetTried: true)
             } else if let prevKey,
                       let idx = channels.firstIndex(where: { $0.key == prevKey }),
@@ -1191,7 +1195,9 @@ final class PlayerViewModel: ObservableObject {
                 if autoBlacklistEnabled, storage.isLineBlacklisted(cand) { continue }
                 guard let u = URL(string: cand),
                       let scheme = u.scheme?.lowercased(),
-                      scheme == "http" || scheme == "https" || scheme == "rtmp" || scheme == "rtsp" else {
+                      // 与 playLineLoop / 解析器白名单一致：rtmp/rtsp 播放内核不支持，
+                      // 放行只会在 playLineLoop 再被拒，白耗一轮切换周期
+                      scheme == "http" || scheme == "https" else {
                     triedLineIndices.insert(nxt)
                     continue
                 }
